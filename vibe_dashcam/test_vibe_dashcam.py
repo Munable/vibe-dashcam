@@ -24,11 +24,15 @@ from vibe_dashcam.vibe_dashcam import (
     SKILL_STATS,
     SKILL_STATS_LOCK,
     SummaryGenerator,
+    get_cases,
     get_skill_board,
+    load_local_cases,
     _parse_toml_model,
     _sanitize_event,
     _update_skill_stats,
     format_evidence_receipt,
+    record_case,
+    restore_local_cases,
     save_local_case,
     scan_configurations,
 )
@@ -40,6 +44,7 @@ def reset_runtime_state() -> None:
     DashcamServer.recent_events.clear()
     drain_queue(DashcamServer.summary_queue)
     DashcamServer.paused = False
+    DashcamServer.persist_cases = False
     with CASE_HISTORY_LOCK:
         CASE_HISTORY.clear()
     with SKILL_STATS_LOCK:
@@ -602,6 +607,49 @@ class VibeDashcamTests(unittest.TestCase):
             self.assertEqual(saved_path, path)
             self.assertEqual(len(lines), 1)
             self.assertEqual(json.loads(lines[0])["case"]["summary"], "captured")
+
+    def test_record_case_auto_persists_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with mock.patch.dict(os.environ, {"LOCALAPPDATA": temp_dir}, clear=False):
+                DashcamServer.persist_cases = True
+
+                case = record_case({
+                    "suspected_skill": "mcp__real.timeout",
+                    "summary": "captured",
+                    "wasted_tokens": 12,
+                })
+
+                path = Path(temp_dir) / "VibeDashcam" / "cases.jsonl"
+                saved = load_local_cases(path)
+                self.assertEqual(saved[0]["id"], case["id"])
+
+    def test_restore_local_cases_rehydrates_recent_cases(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "cases.jsonl"
+            save_local_case({
+                "id": "demo",
+                "suspected_skill": "mcp__demo.timeout",
+                "summary": "demo",
+                "wasted_tokens": 99,
+            }, path)
+            save_local_case({
+                "id": "older",
+                "suspected_skill": "mcp__old.tool",
+                "summary": "old",
+                "wasted_tokens": 5,
+            }, path)
+            save_local_case({
+                "id": "newer",
+                "suspected_skill": "mcp__new.tool",
+                "summary": "new",
+                "wasted_tokens": 8,
+            }, path)
+
+            restored = restore_local_cases(path)
+
+            self.assertEqual(restored, 2)
+            self.assertEqual(get_cases()[0]["id"], "newer")
+            self.assertEqual(get_skill_board()[0]["target"], "mcp__new.tool")
 
     def test_codex_session_tailer_reads_only_new_lines(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

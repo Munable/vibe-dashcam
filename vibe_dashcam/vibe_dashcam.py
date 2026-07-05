@@ -830,6 +830,7 @@ class DashcamServer(http.server.BaseHTTPRequestHandler):
     failure_detector = FailureSignalDetector()
     summarizer = SummaryGenerator()
     paused = False
+    persist_cases = True
 
     def _origin_allowed(self) -> bool:
         origin = self.headers.get("Origin")
@@ -1050,6 +1051,9 @@ def _default_cases_path() -> Path:
 def save_local_case(data: Dict[str, object], path: Optional[Path] = None) -> Path:
     target = path or _default_cases_path()
     target.parent.mkdir(parents=True, exist_ok=True)
+    case_id = data.get("id")
+    if case_id and _saved_case_id_exists(target, case_id):
+        return target
     record = {"saved_at": _utc_now(), "case": data}
     with target.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -1058,11 +1062,78 @@ def save_local_case(data: Dict[str, object], path: Optional[Path] = None) -> Pat
     return target
 
 
-def record_case(data: Dict[str, object]) -> Dict[str, object]:
+def _saved_case_id_exists(path: Path, case_id: object) -> bool:
+    if not path.exists():
+        return False
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except Exception:
+                    continue
+                case = record.get("case") if isinstance(record, dict) else None
+                if isinstance(case, dict) and case.get("id") == case_id:
+                    return True
+    except Exception:
+        return False
+    return False
+
+
+def _normalize_case(data: Dict[str, object]) -> Dict[str, object]:
     case = dict(data)
     case.setdefault("id", uuid.uuid4().hex)
     case.setdefault("created_at", _utc_now())
     case.setdefault("evidence_type", _evidence_type_label(case))
+    return case
+
+
+def _is_demo_case(case: Dict[str, object]) -> bool:
+    target = str(case.get("suspected_skill") or "")
+    return case.get("source_kind") == "demo" or target.startswith("mcp__demo.")
+
+
+def load_local_cases(path: Optional[Path] = None, limit: int = 20) -> List[Dict[str, object]]:
+    target = path or _default_cases_path()
+    if not target.exists():
+        return []
+    cases: List[Dict[str, object]] = []
+    try:
+        with target.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except Exception:
+                    continue
+                case = record.get("case") if isinstance(record, dict) else None
+                if isinstance(case, dict) and not _is_demo_case(case):
+                    cases.append(_normalize_case(case))
+    except Exception:
+        return []
+    return cases[-limit:]
+
+
+def restore_local_cases(path: Optional[Path] = None) -> int:
+    cases = load_local_cases(path)
+    with CASE_HISTORY_LOCK:
+        CASE_HISTORY.clear()
+        CASE_HISTORY.extend(cases)
+    with SKILL_STATS_LOCK:
+        SKILL_STATS.clear()
+    for case in cases:
+        target = str(case.get("suspected_skill") or "unknown")
+        tokens = int(case.get("wasted_tokens") or 0)
+        _update_skill_stats(target, failed=True, tokens=tokens)
+    update_app_state(
+        failure_count=len(cases),
+        case_count=len(cases),
+        latest_case=cases[-1] if cases else None,
+    )
+    return len(cases)
+
+
+def record_case(data: Dict[str, object]) -> Dict[str, object]:
+    case = _normalize_case(data)
     target = str(case.get("suspected_skill") or "unknown")
     tokens = int(case.get("wasted_tokens") or 0)
     _update_skill_stats(target, failed=True, tokens=tokens)
@@ -1076,6 +1147,11 @@ def record_case(data: Dict[str, object]) -> Dict[str, object]:
         case_count=case_count,
         latest_case=case,
     )
+    if DashcamServer.persist_cases:
+        try:
+            save_local_case(case)
+        except Exception:
+            pass
     return case
 
 
@@ -1115,6 +1191,7 @@ def run_server() -> None:
 
 def main() -> None:
     # 启动本地取证 API。正式桌面前端由 Tauri/React 连接这些接口。
+    restore_local_cases()
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
     # 监听 Codex 本地 session 日志，作为不依赖 hook 信任的接入方式。

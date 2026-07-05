@@ -63,6 +63,7 @@ Recommended JSON:
 ```
 
 Dashcam only keeps a field whitelist. Extra fields are ignored.
+Text fields are truncated and common secret patterns are replaced before display or local save.
 
 Whitelisted fields:
 
@@ -102,6 +103,7 @@ def vibe_post(payload: dict) -> None:
 ## Codex Local Path
 
 Codex can work without a custom lifecycle hook. Dashcam watches `%USERPROFILE%\.codex\sessions` and extracts small summaries from new JSONL records.
+If you still want a hook script, use `examples/codex/vibe_dashcam_hook.py` as an example; do not commit your own `.codex` runtime state.
 
 Current local extraction:
 

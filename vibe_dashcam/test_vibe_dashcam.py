@@ -15,10 +15,13 @@ from vibe_dashcam.vibe_dashcam import (
     RecentBehaviorBuffer,
     SummaryGenerator,
     _parse_toml_model,
+    _sanitize_event,
+    format_evidence_receipt,
+    save_local_case,
     scan_configurations,
 )
 
-HOOK_PATH = Path(__file__).resolve().parents[1] / ".codex" / "hooks" / "vibe_dashcam_hook.py"
+HOOK_PATH = Path(__file__).resolve().parents[1] / "examples" / "codex" / "vibe_dashcam_hook.py"
 
 
 def load_hook_module():
@@ -31,7 +34,7 @@ def load_hook_module():
 
 
 class VibeDashcamTests(unittest.TestCase):
-    def test_recent_buffer_keeps_latest_sanitized_events(self) -> None:
+    def test_recent_buffer_keeps_latest_whitelisted_events(self) -> None:
         buffer = RecentBehaviorBuffer(limit=2)
 
         buffer.add({"user_input": "first", "api_key": "secret", "skill_name": "codex"})
@@ -106,7 +109,7 @@ class VibeDashcamTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = Path(temp_dir) / "config.toml"
             config.write_text(
-                'api_key = "sk-should-not-leak"\nmodel = "gpt-5.3-codex-spark"\n',
+                'api_key = "KEY_SHOULD_NOT_LEAK"\nmodel = "gpt-5.3-codex-spark"\n',
                 encoding="utf-8",
             )
 
@@ -135,7 +138,7 @@ class VibeDashcamTests(unittest.TestCase):
         payload = hook.build_dashcam_payload(
             {
                 "prompt": "不对，重来",
-                "api_key": "sk-secret",
+                "api_key": "KEY_SHOULD_NOT_FORWARD",
                 "tool_name": "Bash",
             },
             "UserPromptSubmit",
@@ -146,6 +149,18 @@ class VibeDashcamTests(unittest.TestCase):
         self.assertEqual(payload["user_input"], "不对，重来")
         self.assertEqual(payload["tool_name"], "Bash")
         self.assertNotIn("api_key", payload)
+
+    def test_sanitize_event_redacts_embedded_secret_text(self) -> None:
+        event = _sanitize_event({
+            "client": "codex",
+            "user_input": "api_key=abc123456789 please debug",
+            "ai_output": "token: localtoken123",
+        })
+
+        self.assertIn("[REDACTED]", event["user_input"])
+        self.assertIn("[REDACTED]", event["ai_output"])
+        self.assertNotIn("abc123456789", event["user_input"])
+        self.assertNotIn("localtoken123", event["ai_output"])
 
     def test_extract_codex_session_user_message(self) -> None:
         event = extract_codex_session_event({
@@ -203,6 +218,18 @@ class VibeDashcamTests(unittest.TestCase):
         self.assertEqual(event["event_type"], "McpToolUse")
         self.assertEqual(event["tool_name"], "mcp__node_repl.js")
 
+    def test_extract_codex_session_function_call_output(self) -> None:
+        event = extract_codex_session_event({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "output": "tool call failed: timeout",
+            },
+        })
+
+        self.assertEqual(event["event_type"], "ToolOutput")
+        self.assertIn("timeout", event["ai_output"])
+
     def test_dashcam_server_soft_failure_requires_skill_or_mcp_context(self) -> None:
         DashcamServer.recent_events.clear()
         drain_queue(DashcamServer.summary_queue)
@@ -219,6 +246,7 @@ class VibeDashcamTests(unittest.TestCase):
     def test_dashcam_server_queues_hard_failure_for_mcp_error(self) -> None:
         DashcamServer.recent_events.clear()
         drain_queue(DashcamServer.summary_queue)
+        DashcamServer.paused = False
 
         DashcamServer.ingest_payload({
             "client": "codex",
@@ -229,6 +257,69 @@ class VibeDashcamTests(unittest.TestCase):
 
         summary = DashcamServer.summary_queue.get_nowait()
         self.assertEqual(summary["category"], "skill_mcp_hard_failure")
+
+    def test_dashcam_server_queues_tool_output_failure_after_skill_context(self) -> None:
+        DashcamServer.recent_events.clear()
+        drain_queue(DashcamServer.summary_queue)
+        DashcamServer.paused = False
+
+        DashcamServer.ingest_payload({
+            "client": "codex",
+            "event_type": "PostToolUse",
+            "tool_name": "shell_command",
+            "skill_name": "imagegen",
+        })
+        DashcamServer.ingest_payload({
+            "client": "codex",
+            "event_type": "ToolOutput",
+            "ai_output": "tool call failed: timeout",
+        })
+
+        summary = DashcamServer.summary_queue.get_nowait()
+        self.assertEqual(summary["category"], "skill_mcp_hard_failure")
+
+    def test_dashcam_server_pause_suppresses_cases(self) -> None:
+        DashcamServer.recent_events.clear()
+        drain_queue(DashcamServer.summary_queue)
+        DashcamServer.paused = True
+        try:
+            DashcamServer.ingest_payload({
+                "client": "codex",
+                "event_type": "McpToolUse",
+                "tool_name": "mcp__node_repl.js",
+                "ai_output": "timeout",
+            })
+
+            self.assertTrue(DashcamServer.summary_queue.empty())
+        finally:
+            DashcamServer.paused = False
+
+    def test_format_evidence_receipt_includes_recent_traces(self) -> None:
+        receipt = format_evidence_receipt({
+            "category": "skill_mcp_hard_failure",
+            "suspected_skill": "mcp__demo.timeout",
+            "wasted_tokens": 321,
+            "wasted_cost": 0.01,
+            "summary": "captured",
+            "recent_events": [
+                {"event_type": "McpToolUse", "tool_name": "mcp__demo.timeout", "ai_output": "timeout"}
+            ],
+        })
+
+        self.assertIn("Evidence Receipt", receipt)
+        self.assertIn("Tool-crash evidence", receipt)
+        self.assertIn("Recent local traces", receipt)
+
+    def test_save_local_case_appends_jsonl(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "cases.jsonl"
+
+            saved_path = save_local_case({"summary": "captured"}, path)
+
+            lines = saved_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(saved_path, path)
+            self.assertEqual(len(lines), 1)
+            self.assertEqual(json.loads(lines[0])["case"]["summary"], "captured")
 
     def test_codex_session_tailer_reads_only_new_lines(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

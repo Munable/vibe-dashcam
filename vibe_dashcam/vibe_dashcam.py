@@ -27,6 +27,7 @@ import sys
 import os
 import platform
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 # 尝试导入系统托盘库和绘图库
@@ -164,6 +165,46 @@ SAFE_EVENT_FIELDS = (
 MAX_EVENT_FIELD_CHARS = 1200
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+SECRET_PATTERNS = (
+    re.compile(r"sk-[A-Za-z0-9_-]{8,}"),
+    re.compile(r"gh[pousr]_[A-Za-z0-9_]{8,}"),
+    re.compile(r"(?i)(api[_-]?key|token|secret)\s*[:=]\s*['\"]?[^'\"\s,}]+"),
+)
+
+
+def _redact_secrets(text: str) -> str:
+    redacted = text
+    for pattern in SECRET_PATTERNS:
+        redacted = pattern.sub("[REDACTED]", redacted)
+    return redacted
+
+
+APP_STATE_LOCK = threading.Lock()
+APP_STATE: Dict[str, object] = {
+    "listening": False,
+    "hook_url": "http://localhost:8080/hook",
+    "server_error": None,
+    "tailer_active": False,
+    "tailer_error": None,
+    "last_event_at": None,
+    "event_count": 0,
+}
+
+
+def update_app_state(**changes: object) -> None:
+    with APP_STATE_LOCK:
+        APP_STATE.update(changes)
+
+
+def get_app_state() -> Dict[str, object]:
+    with APP_STATE_LOCK:
+        return dict(APP_STATE)
+
+
 def _as_text(value: object) -> Optional[str]:
     if value is None:
         return None
@@ -172,6 +213,7 @@ def _as_text(value: object) -> Optional[str]:
     else:
         text = json.dumps(value, ensure_ascii=False)
     text = text.strip()
+    text = _redact_secrets(text)
     return text[:MAX_EVENT_FIELD_CHARS] if text else None
 
 
@@ -193,7 +235,9 @@ def _sanitize_event(payload: Dict[str, Any]) -> Dict[str, object]:
         if target in event:
             continue
         if isinstance(value, str):
-            event[target] = value[:MAX_EVENT_FIELD_CHARS]
+            text = _as_text(value)
+            if text:
+                event[target] = text
         elif isinstance(value, (int, float, bool)):
             event[target] = value
 
@@ -562,6 +606,14 @@ def extract_codex_session_event(record: Dict[str, Any]) -> Optional[Dict[str, ob
                 if skill_name:
                     event["skill_name"] = skill_name
                 return event
+        if payload_type == "function_call_output":
+            output = _as_text(payload.get("output") or payload.get("content"))
+            if output:
+                return {
+                    "client": "codex",
+                    "event_type": "ToolOutput",
+                    "ai_output": output,
+                }
         if payload_type == "message" and payload.get("role") == "assistant":
             text = _as_text(_codex_text_from_content(payload.get("content")))
             if text:
@@ -588,12 +640,13 @@ class CodexSessionTailer:
         self._offsets: Dict[Path, int] = {}
         self._running = False
 
-    def start(self) -> None:
+    def start(self) -> bool:
         if not self.sessions_root.is_dir():
-            return
+            return False
         self._running = True
         self._prime_offsets()
         threading.Thread(target=self._run, daemon=True).start()
+        return True
 
     def _recent_files(self) -> List[Path]:
         try:
@@ -655,9 +708,16 @@ class DashcamServer(http.server.BaseHTTPRequestHandler):
     classifier = FeedbackClassifier()
     failure_detector = FailureSignalDetector()
     summarizer = SummaryGenerator()
+    paused = False
 
     @classmethod
     def ingest_payload(cls, payload: Dict[str, Any]) -> None:
+        update_app_state(
+            last_event_at=_utc_now(),
+            event_count=int(get_app_state().get("event_count") or 0) + 1,
+        )
+        if cls.paused:
+            return
         event = _sanitize_event(payload)
         recent_events = cls.recent_events.snapshot()
         hard_decision = cls.failure_detector.classify(event, recent_events) if event else FeedbackDecision(False, "none", "", 0.0)
@@ -712,6 +772,58 @@ class DashcamServer(http.server.BaseHTTPRequestHandler):
         return
 
 
+def _evidence_type_label(data: Dict[str, object]) -> str:
+    if data.get("category") == "skill_mcp_hard_failure":
+        return "Tool-crash evidence"
+    return "User-rebuttal evidence"
+
+
+def _case_title(data: Dict[str, object]) -> str:
+    target = str(data.get("suspected_skill") or "unknown")
+    tokens = data.get("wasted_tokens", "?")
+    return f"{_evidence_type_label(data)} · {target} · {tokens} tokens"
+
+
+def format_evidence_receipt(data: Dict[str, object]) -> str:
+    lines = [
+        "Evidence Receipt",
+        "",
+        f"Type: {_evidence_type_label(data)}",
+        f"Target: {data.get('suspected_skill', 'unknown')}",
+        f"Estimated tokens: {data.get('wasted_tokens', '?')}",
+        f"Estimated cost: ${data.get('wasted_cost', '?')}",
+        "",
+        "Summary:",
+        str(data.get("summary") or "Evidence candidate captured."),
+    ]
+
+    events = data.get("recent_events")
+    if isinstance(events, list) and events:
+        lines.extend(["", "Recent local traces:"])
+        for event in events[-6:]:
+            if not isinstance(event, dict):
+                continue
+            target = event.get("skill_name") or event.get("tool_name") or event.get("client") or "unknown"
+            snippet = event.get("ai_output") or event.get("user_input") or event.get("event_type") or ""
+            lines.append(f"- {event.get('event_type', 'event')} | {target}: {str(snippet)[:180]}")
+    return "\n".join(lines)
+
+
+def _default_cases_path() -> Path:
+    base = os.environ.get("LOCALAPPDATA")
+    root = Path(base) if base else Path.home() / ".vibe-dashcam"
+    return root / "VibeDashcam" / "cases.jsonl"
+
+
+def save_local_case(data: Dict[str, object], path: Optional[Path] = None) -> Path:
+    target = path or _default_cases_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    record = {"saved_at": _utc_now(), "case": data}
+    with target.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return target
+
+
 class DashcamUI:
     """图形界面类，负责展示负反馈候选并提供确认操作。"""
 
@@ -719,8 +831,8 @@ class DashcamUI:
         self.queue = queue_ref
         self.root = tk.Tk()
         self.root.title("Vibe‑Dashcam")
-        # 默认隐藏主窗口，直到有消息或通过托盘调出
-        self.root.withdraw()
+        self.root.geometry("620x480")
+        self.root.minsize(560, 420)
         # 使用原生 ttk 主题提升美观度
         style = ttk.Style(self.root)
         # 尝试选择较现代的主题，如果不存在则忽略
@@ -733,6 +845,13 @@ class DashcamUI:
         # 设置全局字体
         default_font = ("Helvetica", 11)
         self.root.option_add("*Font", default_font)
+        self.latest_summary: Optional[Dict[str, object]] = None
+        self.case_history: List[Dict[str, object]] = []
+        self.case_count = 0
+        self.status_var = tk.StringVar(value="Listening on localhost:8080")
+        self.case_count_var = tk.StringVar(value="0 local cases")
+        self._build_main_panel()
+        self.root.protocol("WM_DELETE_WINDOW", self.root.withdraw)
         # 定时检查队列是否有新的账单
         self.root.after(500, self._poll_queue)
         # 如果支持托盘，初始化托盘图标
@@ -746,6 +865,47 @@ class DashcamUI:
             self.available_models = {}
         # 当前选择的模型，初始为 None，稍后在弹窗中设置
         self.selected_model: Optional[str] = None
+
+    def _build_main_panel(self) -> None:
+        frame = ttk.Frame(self.root, padding=18)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        header = ttk.Frame(frame)
+        header.pack(fill=tk.X)
+        ttk.Label(header, text="Vibe-Dashcam", font=("Helvetica", 18, "bold")).pack(side=tk.LEFT)
+        ttk.Label(header, text="LOCAL ONLY", foreground="#0a7f35").pack(side=tk.RIGHT)
+        ttk.Label(
+            frame,
+            text="Local evidence recorder for Skill/MCP token waste.",
+            foreground="#555555",
+        ).pack(anchor="w", pady=(2, 18))
+
+        status = ttk.LabelFrame(frame, text="Status", padding=12)
+        status.pack(fill=tk.X)
+        ttk.Label(status, textvariable=self.status_var).pack(anchor="w")
+        ttk.Label(status, text="Hook: http://localhost:8080/hook", foreground="#555555").pack(anchor="w", pady=(4, 0))
+        self.source_var = tk.StringVar(value="Sources: starting")
+        self.last_event_var = tk.StringVar(value="Last event: none")
+        ttk.Label(status, textvariable=self.source_var, foreground="#555555").pack(anchor="w", pady=(4, 0))
+        ttk.Label(status, textvariable=self.last_event_var, foreground="#555555").pack(anchor="w", pady=(4, 0))
+        ttk.Label(status, textvariable=self.case_count_var, foreground="#555555").pack(anchor="w", pady=(4, 0))
+
+        recent = ttk.LabelFrame(frame, text="Evidence Cases", padding=12)
+        recent.pack(fill=tk.BOTH, expand=True, pady=(14, 0))
+        self.case_list = tk.Listbox(recent, height=6, activestyle="none")
+        self.case_list.pack(fill=tk.BOTH, expand=True)
+        self.case_list.insert(tk.END, "No evidence case yet. Dashcam is watching locally.")
+        self.case_list.bind("<Double-Button-1>", lambda _event: self._show_selected_summary())
+
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill=tk.X, pady=(14, 0))
+        ttk.Button(buttons, text="Open Case", command=self._show_selected_summary).pack(side=tk.LEFT)
+        ttk.Button(buttons, text="Copy Hook URL", command=self._copy_hook_url).pack(side=tk.LEFT, padx=(8, 0))
+        self.pause_button = ttk.Button(buttons, text="Pause", command=self._toggle_pause)
+        self.pause_button.pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(buttons, text="Test Capture", command=self._test_capture).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(buttons, text="Hide", command=self.root.withdraw).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(buttons, text="Quit", command=self._quit_app).pack(side=tk.RIGHT)
 
     def _init_tray_icon(self) -> None:
         """初始化系统托盘图标及菜单。"""
@@ -767,6 +927,14 @@ class DashcamUI:
                 "显示窗口",
                 lambda: self._show_root(),
                 default=True
+            ),
+            MenuItem(
+                "最新账单",
+                lambda: self.root.after(0, self._show_latest_summary)
+            ),
+            MenuItem(
+                "暂停/继续",
+                lambda: self.root.after(0, self._toggle_pause)
             ),
             MenuItem(
                 "退出",
@@ -794,6 +962,7 @@ class DashcamUI:
         """显示主窗口。"""
         try:
             self.root.after(0, self.root.deiconify)
+            self.root.after(0, self.root.lift)
         except Exception:
             pass
 
@@ -816,70 +985,139 @@ class DashcamUI:
             # 没有新数据
             pass
         else:
+            self._remember_summary(summary_data)
             self._show_summary_window(summary_data)
         finally:
+            self._refresh_status()
             self.root.after(500, self._poll_queue)
+
+    def _refresh_status(self) -> None:
+        state = get_app_state()
+        if DashcamServer.paused:
+            self.status_var.set("Paused")
+        elif state.get("server_error"):
+            self.status_var.set(f"Port error: {state.get('server_error')}")
+        elif state.get("listening"):
+            self.status_var.set("Listening on localhost:8080")
+        else:
+            self.status_var.set("Starting listener")
+        source = "Sources: local hook"
+        if state.get("tailer_active"):
+            source += " + Codex session logs"
+        elif state.get("tailer_error"):
+            source += f" (Codex: {state.get('tailer_error')})"
+        self.source_var.set(source)
+        self.last_event_var.set(
+            f"Events: {state.get('event_count', 0)} · Last event: {state.get('last_event_at') or 'none'}"
+        )
+
+    def _remember_summary(self, data: Dict[str, object]) -> None:
+        self.latest_summary = data
+        self.case_history.append(data)
+        self.case_count += 1
+        self.case_count_var.set(f"{self.case_count} local case{'s' if self.case_count != 1 else ''}")
+        self.case_list.delete(0, tk.END)
+        for item in reversed(self.case_history[-12:]):
+            self.case_list.insert(tk.END, _case_title(item))
+
+    def _show_latest_summary(self) -> None:
+        if self.latest_summary:
+            self._show_summary_window(self.latest_summary)
+        else:
+            messagebox.showinfo("Vibe-Dashcam", "No evidence case yet.")
+
+    def _show_selected_summary(self) -> None:
+        selection = self.case_list.curselection()
+        if not selection:
+            self._show_latest_summary()
+            return
+        index = selection[0]
+        cases = list(reversed(self.case_history[-12:]))
+        if 0 <= index < len(cases):
+            self._show_summary_window(cases[index])
+        else:
+            self._show_latest_summary()
+
+    def _copy_hook_url(self) -> None:
+        self.root.clipboard_clear()
+        self.root.clipboard_append("http://localhost:8080/hook")
+        messagebox.showinfo("Copied", "Hook URL copied.")
+
+    def _copy_text(self, text: str) -> None:
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        messagebox.showinfo("Copied", "Receipt copied.")
+
+    def _toggle_pause(self) -> None:
+        DashcamServer.paused = not DashcamServer.paused
+        self.pause_button.configure(text="Resume" if DashcamServer.paused else "Pause")
+        self._refresh_status()
+
+    def _test_capture(self) -> None:
+        if DashcamServer.paused:
+            messagebox.showinfo("Paused", "Resume listening before testing capture.")
+            return
+        DashcamServer.ingest_payload({
+            "client": "vibe-dashcam",
+            "event_type": "McpToolUse",
+            "tool_name": "mcp__demo.timeout",
+            "ai_output": "timeout",
+            "token_count": 321,
+        })
 
     def _show_summary_window(self, data: Dict[str, object]) -> None:
         # 创建一个顶层窗口显示账单信息
         window = tk.Toplevel(self.root)
-        window.title("Vibe‑Dashcam 负反馈候选")
-        window.geometry("420x220")
-        window.resizable(False, False)
-        frame = ttk.Frame(window, padding=10)
+        window.title("Vibe‑Dashcam Evidence Receipt")
+        window.geometry("560x360")
+        window.minsize(520, 320)
+        frame = ttk.Frame(window, padding=18)
         frame.pack(fill=tk.BOTH, expand=True)
-        # 显示摘要文本
-        summary = data.get('summary', '检测到可能的翻车')
-        label = ttk.Label(
-            frame,
-            text=summary,
-            wraplength=400,
-            justify=tk.LEFT,
-            anchor='w'
+
+        ttk.Label(frame, text="Evidence Receipt", font=("Helvetica", 16, "bold")).pack(anchor="w")
+        meta = (
+            f"Target: {data.get('suspected_skill', 'unknown')}   "
+            f"Tokens: {data.get('wasted_tokens', '?')}   "
+            f"Cost: ${data.get('wasted_cost', '?')}"
         )
-        label.pack(fill=tk.X, pady=(0, 12))
-        # 如果有可用模型，提供下拉选择框
-        model_options: list[str] = []
-        for tool, model_name in (self.available_models or {}).items():
-            if model_name:
-                model_options.append(f"{tool}:{model_name}")
-        if model_options:
-            ttk.Label(frame, text="选择评审模型:").pack(anchor='w')
-            self._model_var = tk.StringVar(window)
-            # 默认选择第一个可用模型
-            self._model_var.set(model_options[0])
-            self.selected_model = model_options[0]
-            def _on_select(value: str) -> None:
-                # 更新当前选择
-                self.selected_model = value
-            option_menu = ttk.OptionMenu(frame, self._model_var, model_options[0], *model_options, command=_on_select)
-            option_menu.pack(fill=tk.X, pady=(0, 12))
+        ttk.Label(frame, text=meta, foreground="#555555").pack(anchor="w", pady=(2, 12))
+
+        receipt = tk.Text(frame, height=9, wrap=tk.WORD)
+        receipt.pack(fill=tk.BOTH, expand=True)
+        receipt_text = format_evidence_receipt(data)
+        receipt.insert("1.0", receipt_text)
+        receipt.configure(state=tk.DISABLED)
 
         # 确认按钮
         btn_frame = ttk.Frame(frame)
-        btn_frame.pack(fill=tk.X, anchor='w')
+        btn_frame.pack(fill=tk.X, anchor='w', pady=(12, 0))
         upload_button = ttk.Button(
             btn_frame,
-            text="确认负反馈",
-            command=lambda: self._confirm_negative(window)
+            text="Confirm Local Case",
+            command=lambda: self._confirm_negative(window, data)
         )
         upload_button.pack(side=tk.LEFT, padx=(0, 8))
+        copy_button = ttk.Button(
+            btn_frame,
+            text="Copy Receipt",
+            command=lambda: self._copy_text(receipt_text)
+        )
+        copy_button.pack(side=tk.LEFT, padx=(0, 8))
         # 关闭按钮
         close_button = ttk.Button(
             btn_frame,
-            text="关闭",
+            text="Close",
             command=window.destroy
         )
         close_button.pack(side=tk.LEFT)
         # 显示窗口
         window.transient(self.root)
-        window.grab_set()
-        # 使用 wait_window 以避免嵌套主循环
-        window.wait_window()
+        window.lift()
 
-    def _confirm_negative(self, window: tk.Toplevel) -> None:
+    def _confirm_negative(self, window: tk.Toplevel, data: Dict[str, object]) -> None:
         """确认本地负反馈候选。"""
-        messagebox.showinfo("已确认", "已在本地标记为负反馈候选；当前版本不会上传公网。")
+        path = save_local_case(data)
+        messagebox.showinfo("Saved", f"Saved locally:\n{path}\n\nThis build does not upload.")
         window.destroy()
 
     def run(self) -> None:
@@ -889,12 +1127,18 @@ class DashcamUI:
 def run_server() -> None:
     """在子线程中启动 HTTP 服务器。"""
     server_address = ('localhost', 8080)
-    httpd = http.server.ThreadingHTTPServer(server_address, DashcamServer)
+    try:
+        httpd = http.server.ThreadingHTTPServer(server_address, DashcamServer)
+    except OSError as exc:
+        update_app_state(listening=False, server_error=str(exc))
+        return
+    update_app_state(listening=True, server_error=None)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        update_app_state(listening=False)
         httpd.server_close()
 
 
@@ -903,7 +1147,11 @@ def main() -> None:
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
     # 监听 Codex 本地 session 日志，作为不依赖 hook 信任的接入方式。
-    CodexSessionTailer(DashcamServer.ingest_payload).start()
+    try:
+        tailer_active = CodexSessionTailer(DashcamServer.ingest_payload).start()
+        update_app_state(tailer_active=tailer_active, tailer_error=None if tailer_active else "Codex sessions not found")
+    except Exception as exc:
+        update_app_state(tailer_active=False, tailer_error=str(exc))
     # 创建并运行 UI
     ui = DashcamUI(DashcamServer.summary_queue)
     ui.run()

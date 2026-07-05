@@ -47,7 +47,7 @@ The current build uses conservative local rules. Later model review can help sum
 - Accepts short hook summaries from Claude Code, Hermes, OpenCode, or other clients.
 - Detects Codex Skill reads from `SKILL.md` paths.
 - Detects MCP calls from `mcp__...` tool namespaces and MCP event summaries.
-- Keeps only the latest 12 sanitized behavior summaries.
+- Keeps only the latest 12 field-whitelisted, truncated, secret-redacted behavior summaries.
 - Does not ask for API keys.
 - Does not read `.env`.
 - Does not upload anything to the public internet in this build.
@@ -70,6 +70,8 @@ Codex can be watched from local session logs. Other clients can POST a small JSO
 
 Send less, not more. Never send secrets or full source files.
 
+An optional Codex hook example lives at `examples/codex/vibe_dashcam_hook.py`.
+
 ```json
 {
   "client": "codex",
@@ -82,7 +84,7 @@ Send less, not more. Never send secrets or full source files.
 }
 ```
 
-Dashcam keeps only these fields: `client`, `event_type`, `user_input`, `ai_output`, `skill_name`, `tool_name`, `model`, `token_count`.
+Dashcam keeps only these fields: `client`, `event_type`, `user_input`, `ai_output`, `skill_name`, `tool_name`, `model`, `token_count`. Text fields are truncated and common secret patterns are replaced before display or local save.
 
 ## Package
 

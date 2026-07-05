@@ -9,3 +9,8 @@ build/
 .pytest_cache/
 .coverage
 .env
+.agents/
+.codex/
+*.jsonl
+*.log
+cases.jsonl

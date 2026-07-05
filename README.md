@@ -43,11 +43,13 @@ The current build uses conservative local rules. Later model review can help sum
 ## Current Local Build
 
 - Runs locally and listens on `http://localhost:8080/hook`.
+- Ships a Tauri + React desktop HUD designed as a small bottom-right red/black board.
 - Watches local Codex session JSONL files as the default no-trust path.
 - Accepts short hook summaries from Claude Code, Hermes, OpenCode, or other clients.
 - Detects Codex Skill reads from `SKILL.md` paths.
 - Detects MCP calls from `mcp__...` tool namespaces and MCP event summaries.
 - Keeps only the latest 12 field-whitelisted, truncated, secret-redacted behavior summaries.
+- Shows Skill/MCP clean/crash counts, latest token receipt, local save, copy receipt, pause, and test capture.
 - Does not ask for API keys.
 - Does not read `.env`.
 - Does not upload anything to the public internet in this build.
@@ -57,12 +59,22 @@ The current build uses conservative local rules. Later model review can help sum
 PowerShell:
 
 ```powershell
-cd .\vibe_dashcam
-python -m pip install pystray Pillow
-python .\vibe_dashcam.py
+# Terminal 1: start the local evidence core
+python .\vibe_dashcam\vibe_dashcam.py
+
+# Terminal 2: start the desktop HUD
+cd .\desktop
+npm install
+npm run tauri dev
 ```
 
-`pystray` and `Pillow` only power the tray icon. The core local listener still works without them.
+The native desktop HUD requires Node.js and Rust/Cargo because it is built with Tauri. For a frontend-only build check:
+
+```powershell
+cd .\desktop
+npm install
+npm run build
+```
 
 ## Hook Payload
 
@@ -91,12 +103,11 @@ Dashcam keeps only these fields: `client`, `event_type`, `user_input`, `ai_outpu
 Windows:
 
 ```powershell
-cd .\vibe_dashcam
-python -m pip install pyinstaller
-pyinstaller --noconsole --onefile .\vibe_dashcam.py
+cd .\desktop
+npm run tauri build
 ```
 
-The packaged file is written to `dist\`.
+The Python core still runs as a separate local service in this build. Bundling it as a Tauri sidecar is intentionally left for the next packaging pass.
 
 ## Not Yet
 

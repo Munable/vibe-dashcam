@@ -3,6 +3,8 @@ __pycache__/
 .Python
 .venv/
 venv/
+node_modules/
+desktop/src-tauri/target/
 dist/
 build/
 *.spec

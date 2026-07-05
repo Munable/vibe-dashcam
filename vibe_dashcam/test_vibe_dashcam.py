@@ -1,18 +1,28 @@
 import os
+import http.server
 import importlib.util
 import json
 import tempfile
+import threading
 import unittest
+import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
 from vibe_dashcam.vibe_dashcam import (
+    APP_STATE,
+    APP_STATE_LOCK,
+    CASE_HISTORY,
+    CASE_HISTORY_LOCK,
     CodexSessionTailer,
     DashcamServer,
     extract_codex_session_event,
     FeedbackClassifier,
     FailureSignalDetector,
     RecentBehaviorBuffer,
+    SKILL_STATS,
+    SKILL_STATS_LOCK,
     SummaryGenerator,
     _parse_toml_model,
     _sanitize_event,
@@ -22,6 +32,55 @@ from vibe_dashcam.vibe_dashcam import (
 )
 
 HOOK_PATH = Path(__file__).resolve().parents[1] / "examples" / "codex" / "vibe_dashcam_hook.py"
+
+
+def reset_runtime_state() -> None:
+    DashcamServer.recent_events.clear()
+    drain_queue(DashcamServer.summary_queue)
+    DashcamServer.paused = False
+    with CASE_HISTORY_LOCK:
+        CASE_HISTORY.clear()
+    with SKILL_STATS_LOCK:
+        SKILL_STATS.clear()
+    with APP_STATE_LOCK:
+        APP_STATE.update({
+            "listening": False,
+            "hook_url": "http://localhost:8080/hook",
+            "server_error": None,
+            "tailer_active": False,
+            "tailer_error": None,
+            "last_event_at": None,
+            "event_count": 0,
+            "ok_event_count": 0,
+            "failure_count": 0,
+            "case_count": 0,
+            "latest_case": None,
+        })
+
+
+@contextmanager
+def run_test_server():
+    server = http.server.ThreadingHTTPServer(("localhost", 0), DashcamServer)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://localhost:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def api_json(base_url: str, path: str, method: str = "GET", payload=None):
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        base_url + path,
+        data=data,
+        method=method,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=3) as response:
+        return json.loads(response.read().decode("utf-8"))
 
 
 def load_hook_module():
@@ -34,6 +93,9 @@ def load_hook_module():
 
 
 class VibeDashcamTests(unittest.TestCase):
+    def setUp(self) -> None:
+        reset_runtime_state()
+
     def test_recent_buffer_keeps_latest_whitelisted_events(self) -> None:
         buffer = RecentBehaviorBuffer(limit=2)
 
@@ -104,6 +166,47 @@ class VibeDashcamTests(unittest.TestCase):
 
         self.assertEqual(summary["category"], "skill_mcp_hard_failure")
         self.assertIn("崩溃证据候选", summary["summary"])
+
+    def test_summary_prioritizes_hard_failure_trigger_target(self) -> None:
+        decision = FailureSignalDetector().classify({
+            "event_type": "McpToolUse",
+            "tool_name": "mcp__demo.timeout",
+            "ai_output": "timeout",
+        })
+
+        summary = SummaryGenerator().generate(
+            [
+                {"client": "codex", "event_type": "PostToolUse", "tool_name": "shell_command"},
+                {
+                    "client": "vibe-dashcam",
+                    "event_type": "McpToolUse",
+                    "tool_name": "mcp__demo.timeout",
+                    "ai_output": "timeout",
+                },
+            ],
+            trigger_text="timeout",
+            decision=decision,
+        )
+
+        self.assertEqual(summary["suspected_skill"], "mcp__demo.timeout")
+
+    def test_summary_ignores_plain_tools_when_choosing_failure_target(self) -> None:
+        decision = FailureSignalDetector().classify(
+            {"event_type": "ToolOutput", "ai_output": "timeout"},
+            [{"event_type": "McpToolUse", "tool_name": "mcp__node_repl.js"}],
+        )
+
+        summary = SummaryGenerator().generate(
+            [
+                {"client": "codex", "event_type": "McpToolUse", "tool_name": "mcp__node_repl.js"},
+                {"client": "codex", "event_type": "PostToolUse", "tool_name": "shell_command"},
+                {"client": "codex", "event_type": "ToolOutput", "ai_output": "timeout"},
+            ],
+            trigger_text="timeout",
+            decision=decision,
+        )
+
+        self.assertEqual(summary["suspected_skill"], "mcp__node_repl.js")
 
     def test_toml_scan_reads_model_without_exposing_api_key(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -279,8 +382,6 @@ class VibeDashcamTests(unittest.TestCase):
         self.assertEqual(summary["category"], "skill_mcp_hard_failure")
 
     def test_dashcam_server_pause_suppresses_cases(self) -> None:
-        DashcamServer.recent_events.clear()
-        drain_queue(DashcamServer.summary_queue)
         DashcamServer.paused = True
         try:
             DashcamServer.ingest_payload({
@@ -293,6 +394,46 @@ class VibeDashcamTests(unittest.TestCase):
             self.assertTrue(DashcamServer.summary_queue.empty())
         finally:
             DashcamServer.paused = False
+
+    def test_state_api_reports_skill_board_and_latest_case(self) -> None:
+        with run_test_server() as base_url:
+            response = api_json(base_url, "/test-capture", "POST", {})
+            state = api_json(base_url, "/state")
+            cases = api_json(base_url, "/cases")
+
+        self.assertTrue(response["created"])
+        self.assertEqual(state["failure_count"], 1)
+        self.assertEqual(state["case_count"], 1)
+        self.assertEqual(state["latest_case"]["suspected_skill"], "mcp__demo.timeout")
+        self.assertEqual(cases["cases"][0]["suspected_skill"], "mcp__demo.timeout")
+        self.assertEqual(state["skill_board"][0]["target"], "mcp__demo.timeout")
+        self.assertEqual(state["skill_board"][0]["failure"], 1)
+
+    def test_pause_api_suppresses_test_capture(self) -> None:
+        with run_test_server() as base_url:
+            pause_response = api_json(base_url, "/control/pause", "POST", {"paused": True})
+            capture_response = api_json(base_url, "/test-capture", "POST", {})
+            state = api_json(base_url, "/state")
+
+        self.assertTrue(pause_response["state"]["paused"])
+        self.assertFalse(capture_response["created"])
+        self.assertEqual(state["failure_count"], 0)
+        self.assertEqual(state["case_count"], 0)
+
+    def test_cases_save_api_writes_selected_case(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with mock.patch.dict(os.environ, {"LOCALAPPDATA": temp_dir}, clear=False):
+                with run_test_server() as base_url:
+                    api_json(base_url, "/test-capture", "POST", {})
+                    case_id = api_json(base_url, "/cases")["cases"][0]["id"]
+                    response = api_json(base_url, "/cases/save", "POST", {"case_id": case_id})
+
+            saved_path = Path(response["path"])
+            saved_lines = saved_path.read_text(encoding="utf-8").splitlines()
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(len(saved_lines), 1)
+        self.assertEqual(json.loads(saved_lines[0])["case"]["id"], case_id)
 
     def test_format_evidence_receipt_includes_recent_traces(self) -> None:
         receipt = format_evidence_receipt({

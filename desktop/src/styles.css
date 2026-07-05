@@ -21,7 +21,7 @@ body,
 body {
   margin: 0;
   min-width: 320px;
-  min-height: 480px;
+  min-height: 420px;
   overflow: hidden;
   background: transparent;
 }
@@ -47,7 +47,7 @@ button {
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 8px;
-  background: rgba(9, 12, 18, 0.76);
+  background: rgba(9, 12, 18, 0.96);
   box-shadow: 0 16px 54px rgba(0, 0, 0, 0.42);
   backdrop-filter: blur(20px) saturate(138%);
   padding: 10px;
@@ -201,10 +201,6 @@ button {
 }
 
 .glass-card.is-expanded .board {
-  max-height: 76px;
-}
-
-.glass-card.is-expanded .board-row:nth-of-type(n+2) {
   display: none;
 }
 
@@ -299,7 +295,7 @@ button {
 }
 
 .latest-body p {
-  max-height: 34px;
+  max-height: 28px;
   overflow: hidden;
   margin: 0 0 6px;
   color: rgba(244, 247, 252, 0.82);
@@ -315,6 +311,8 @@ button {
   display: grid;
   gap: 4px;
   margin-top: 6px;
+  max-height: 52px;
+  overflow: hidden;
 }
 
 .trace-list span {
@@ -366,6 +364,7 @@ button {
 .actions {
   flex: 0 0 auto;
   gap: 5px;
+  margin-top: auto;
 }
 
 .actions button {
@@ -404,7 +403,7 @@ button {
   width: calc(100% - 16px);
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 8px;
-  background: rgba(10, 14, 22, 0.9);
+  background: rgba(10, 14, 22, 0.94);
   box-shadow: -14px 0 44px rgba(0, 0, 0, 0.34);
   backdrop-filter: blur(20px);
   padding: 12px;

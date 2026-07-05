@@ -379,7 +379,7 @@ export function App() {
             </button>
           </div>
           <SettingBlock title="Sources" lines={["Codex session logs", "Local hook payloads"]} />
-          <SettingBlock title="Privacy" lines={["Secret redaction on", "Text truncation on", "No cloud upload"]} />
+          <SettingBlock title="Privacy" lines={["Secret redaction on", "Text truncation on", "Local only"]} />
           <SettingBlock title="Storage" lines={["Local JSONL cases", "Save only on click"]} />
           <SettingBlock title="Window" lines={["Bottom-right minimap", "Always on top"]} />
           <div className="setting-block">

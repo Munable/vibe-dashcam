@@ -137,7 +137,7 @@ OpenCode:
 
 Dashcam does not prove the code is wrong. It creates a local candidate case when a Skill/MCP leaves crash evidence or when the user rebuts output after Skill/MCP involvement.
 
-Public upload, leaderboards, and model-assisted verdicts are later steps and should stay user-approved.
+Dashcam stays local. The hook should only send tiny summaries to localhost.
 
 ---
 
@@ -152,4 +152,4 @@ Public upload, leaderboards, and model-assisted verdicts are later steps and sho
 3. 用户在 Skill/MCP 之后说“不对、重来、撤销”，就是用户驳斥证据。
 4. 没有 Skill/MCP 上下文，就不乱归因。
 
-只发摘要，不发密钥，不发完整仓库，不发 `.env`。Dashcam 当前只在本地生成候选账单，不上传公网。
+只发摘要，不发密钥，不发完整仓库，不发 `.env`。Dashcam 当前只在本机生成候选账单。

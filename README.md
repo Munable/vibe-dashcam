@@ -10,8 +10,6 @@ The first target is not "all AI mistakes". The first target is narrower and mean
 
 > When a Skill or MCP server wastes expensive model time, catch the evidence before the context disappears.
 
-This is the first local brick for Vibe-Hub: a future public board for real-world Skill/MCP failure reports.
-
 ## The Degen Rule
 
 Do not build a giant lab before you can catch the crash.
@@ -54,7 +52,7 @@ The current build uses conservative local rules. Later model review can help sum
 - Shows Skill/MCP clean/flagged counts, latest estimated receipt, local save, copy receipt, and pause.
 - Does not ask for API keys.
 - Does not read `.env`.
-- Does not upload anything to the public internet in this build.
+- Local only. Nothing leaves this machine.
 
 ## Run On Windows
 
@@ -109,11 +107,9 @@ npm run tauri build
 
 The desktop app starts the bundled local evidence core automatically. Development mode still uses the system Python runtime for faster debugging.
 
-## Not Yet
+## Boundary
 
-This local build does not run Vibe-Hub, publish a leaderboard, read the whole repository, prove code correctness, or auto-shame a project online.
-
-It only creates local evidence cards. Public upload should stay explicit and user-approved.
+This is a small local tool. It only creates local evidence cards for Skill/MCP activity.
 
 ---
 
@@ -130,4 +126,4 @@ Vibe-Dashcam 是一个本地 AI 编程行车记录仪。它不做重型评测平
 3. Skill/MCP 跑完后用户说“不对、重来、撤销”，就是用户驳斥证据。
 4. 没摸到 Skill/MCP，就不乱扣锅。
 
-当前版本只在本地生成候选账单，不上传公网，不要 API Key，不读 `.env`。后面 Vibe-Hub 要做红黑榜，也应该基于这种真实、本地、可脱敏的证据，而不是靠营销文案吹哪个 Skill 很神。
+当前版本就是一个本地小工具：只在本机生成候选账单，不要 API Key，不读 `.env`。

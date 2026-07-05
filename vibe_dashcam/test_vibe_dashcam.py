@@ -57,6 +57,14 @@ def reset_runtime_state() -> None:
             "failure_count": 0,
             "case_count": 0,
             "latest_case": None,
+            "source_status": {
+                "codex_session": {
+                    "active": False,
+                    "path": None,
+                    "last_seen_at": None,
+                    "last_event_name": None,
+                }
+            },
         })
 
 
@@ -83,6 +91,24 @@ def api_json(base_url: str, path: str, method: str = "GET", payload=None):
     )
     with urllib.request.urlopen(request, timeout=3) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def api_status(base_url: str, path: str, method: str = "GET", payload=None, headers=None):
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        base_url + path,
+        data=data,
+        method=method,
+        headers={"Content-Type": "application/json", **(headers or {})},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=3) as response:
+            return response.status, response.headers, response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        try:
+            return exc.code, exc.headers, exc.read().decode("utf-8")
+        finally:
+            exc.close()
 
 
 def load_hook_module():
@@ -143,6 +169,19 @@ class VibeDashcamTests(unittest.TestCase):
             {
                 "event_type": "ToolOutput",
                 "ai_output": 'Exit code: 0\n{"server_error":null,"failure_count":0}',
+            },
+            [{"event_type": "McpToolUse", "tool_name": "mcp__node_repl.js_reset"}],
+        )
+
+        self.assertFalse(decision.negative)
+
+    def test_hard_failure_detector_ignores_clean_tool_output_with_failure_words(self) -> None:
+        detector = FailureSignalDetector()
+
+        decision = detector.classify(
+            {
+                "event_type": "ToolOutput",
+                "ai_output": "Exit code: 0\nOutput:\nThis doc mentions failure, error, timeout, and 失败.",
             },
             [{"event_type": "McpToolUse", "tool_name": "mcp__node_repl.js_reset"}],
         )
@@ -342,6 +381,7 @@ class VibeDashcamTests(unittest.TestCase):
         })
 
         self.assertEqual(event["client"], "codex")
+        self.assertEqual(event["source_kind"], "codex_session")
         self.assertEqual(event["event_type"], "UserPromptSubmit")
         self.assertEqual(event["user_input"], "不对，重来")
 
@@ -427,6 +467,7 @@ class VibeDashcamTests(unittest.TestCase):
 
         summary = DashcamServer.summary_queue.get_nowait()
         self.assertEqual(summary["category"], "skill_mcp_hard_failure")
+        self.assertEqual(summary["source_kind"], "codex_session")
 
     def test_dashcam_server_queues_tool_output_failure_after_skill_context(self) -> None:
         DashcamServer.recent_events.clear()
@@ -464,26 +505,53 @@ class VibeDashcamTests(unittest.TestCase):
 
     def test_state_api_reports_skill_board_and_latest_case(self) -> None:
         with run_test_server() as base_url:
-            response = api_json(base_url, "/test-capture", "POST", {})
+            response = api_json(base_url, "/hook", "POST", {
+                "client": "codex",
+                "source_kind": "hook",
+                "event_type": "McpToolUse",
+                "tool_name": "mcp__demo.timeout",
+                "ai_output": "timeout",
+                "token_count": 321,
+            })
             state = api_json(base_url, "/state")
             cases = api_json(base_url, "/cases")
 
-        self.assertTrue(response["created"])
+        self.assertTrue(response["ok"])
         self.assertEqual(state["failure_count"], 1)
         self.assertEqual(state["case_count"], 1)
         self.assertEqual(state["latest_case"]["suspected_skill"], "mcp__demo.timeout")
+        self.assertEqual(state["latest_case"]["source_kind"], "hook")
         self.assertEqual(cases["cases"][0]["suspected_skill"], "mcp__demo.timeout")
         self.assertEqual(state["skill_board"][0]["target"], "mcp__demo.timeout")
         self.assertEqual(state["skill_board"][0]["failure"], 1)
 
-    def test_pause_api_suppresses_test_capture(self) -> None:
+    def test_test_capture_returns_demo_without_polluting_real_state(self) -> None:
+        with run_test_server() as base_url:
+            response = api_json(base_url, "/test-capture", "POST", {})
+            state = api_json(base_url, "/state")
+            cases = api_json(base_url, "/cases")
+
+        self.assertTrue(response["ok"])
+        self.assertFalse(response["created"])
+        self.assertEqual(response["demo_case"]["source_kind"], "demo")
+        self.assertEqual(state["failure_count"], 0)
+        self.assertEqual(state["case_count"], 0)
+        self.assertIsNone(state["latest_case"])
+        self.assertEqual(cases["cases"], [])
+        self.assertEqual(state["skill_board"], [])
+
+    def test_pause_api_suppresses_hook_cases(self) -> None:
         with run_test_server() as base_url:
             pause_response = api_json(base_url, "/control/pause", "POST", {"paused": True})
-            capture_response = api_json(base_url, "/test-capture", "POST", {})
+            capture_response = api_json(base_url, "/hook", "POST", {
+                "event_type": "McpToolUse",
+                "tool_name": "mcp__demo.timeout",
+                "ai_output": "timeout",
+            })
             state = api_json(base_url, "/state")
 
         self.assertTrue(pause_response["state"]["paused"])
-        self.assertFalse(capture_response["created"])
+        self.assertTrue(capture_response["ok"])
         self.assertEqual(state["failure_count"], 0)
         self.assertEqual(state["case_count"], 0)
 
@@ -491,7 +559,11 @@ class VibeDashcamTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             with mock.patch.dict(os.environ, {"LOCALAPPDATA": temp_dir}, clear=False):
                 with run_test_server() as base_url:
-                    api_json(base_url, "/test-capture", "POST", {})
+                    api_json(base_url, "/hook", "POST", {
+                        "event_type": "McpToolUse",
+                        "tool_name": "mcp__demo.timeout",
+                        "ai_output": "timeout",
+                    })
                     case_id = api_json(base_url, "/cases")["cases"][0]["id"]
                     response = api_json(base_url, "/cases/save", "POST", {"case_id": case_id})
 
@@ -551,6 +623,39 @@ class VibeDashcamTests(unittest.TestCase):
 
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0]["user_input"], "new")
+
+    def test_codex_session_tailer_default_root_uses_home_on_all_platforms(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home = Path(temp_dir)
+            with mock.patch("vibe_dashcam.vibe_dashcam.Path.home", return_value=home):
+                with mock.patch.dict(os.environ, {"USERPROFILE": "C:\\wrong"}, clear=False):
+                    tailer = CodexSessionTailer(lambda event: None)
+
+        self.assertEqual(tailer.sessions_root, home / ".codex" / "sessions")
+
+    def test_health_api_identifies_vibe_dashcam_core(self) -> None:
+        with run_test_server() as base_url:
+            response = api_json(base_url, "/health")
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["app"], "vibe-dashcam")
+
+    def test_cors_allows_dev_origin_and_rejects_unknown_origin_for_private_api(self) -> None:
+        with run_test_server() as base_url:
+            ok_status, ok_headers, _ = api_status(
+                base_url,
+                "/state",
+                headers={"Origin": "http://127.0.0.1:1420"},
+            )
+            bad_status, _, _ = api_status(
+                base_url,
+                "/state",
+                headers={"Origin": "https://example.com"},
+            )
+
+        self.assertEqual(ok_status, 200)
+        self.assertEqual(ok_headers["Access-Control-Allow-Origin"], "http://127.0.0.1:1420")
+        self.assertEqual(bad_status, 403)
 
 
 def drain_queue(target_queue) -> None:

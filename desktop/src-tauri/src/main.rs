@@ -1,17 +1,22 @@
 use std::{
     env, fs,
+    io::{Read, Write},
     net::TcpStream,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Mutex,
+    time::Duration,
 };
-use tauri::Manager;
+use tauri::{Manager, State};
 
 struct CoreProcess(Mutex<Option<Child>>);
+struct CoreStatus(Mutex<String>);
 
 fn main() {
     tauri::Builder::default()
         .manage(CoreProcess(Mutex::new(None)))
+        .manage(CoreStatus(Mutex::new(String::from("starting"))))
+        .invoke_handler(tauri::generate_handler![core_launch_status])
         .setup(|app| {
             start_core(app);
             if let Some(window) = app.get_webview_window("main") {
@@ -41,16 +46,58 @@ fn main() {
         });
 }
 
+#[tauri::command]
+fn core_launch_status(status: State<CoreStatus>) -> String {
+    status.0.lock().expect("core status lock").clone()
+}
+
 fn start_core(app: &tauri::App) {
-    if TcpStream::connect(("127.0.0.1", 8080)).is_ok() {
+    if core_health_ok() {
+        set_core_status(app, "ok");
         return;
     }
-    let Some(script) = core_script_path(app) else {
+    if TcpStream::connect(("127.0.0.1", 8080)).is_ok() {
+        set_core_status(app, "port_occupied");
+        return;
+    }
+    let program = if cfg!(debug_assertions) {
+        core_script_path(app)
+    } else {
+        core_binary_path(app)
+    };
+    let Some(program) = program.filter(|path| path.exists()) else {
+        set_core_status(app, "core_missing");
         return;
     };
-    if let Ok(child) = spawn_python_core(&script) {
-        *app.state::<CoreProcess>().0.lock().expect("core process lock") = Some(child);
+    let child = if cfg!(debug_assertions) {
+        spawn_python_core(&program)
+    } else {
+        spawn_binary_core(&program)
+    };
+    match child {
+        Ok(child) => {
+            *app.state::<CoreProcess>().0.lock().expect("core process lock") = Some(child);
+            set_core_status(app, "ok");
+        }
+        Err(_) => set_core_status(app, "core_start_failed"),
+    };
+}
+
+fn set_core_status(app: &tauri::App, value: &str) {
+    *app.state::<CoreStatus>().0.lock().expect("core status lock") = value.to_string();
+}
+
+fn core_health_ok() -> bool {
+    let Ok(mut stream) = TcpStream::connect(("127.0.0.1", 8080)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let request = b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    if stream.write_all(request).is_err() {
+        return false;
     }
+    let mut response = String::new();
+    stream.read_to_string(&mut response).is_ok() && response.contains("vibe-dashcam")
 }
 
 fn stop_core(app: &tauri::AppHandle) {
@@ -75,6 +122,22 @@ fn core_script_path(app: &tauri::App) -> Option<PathBuf> {
             .map(|root| root.join("vibe_dashcam").join("vibe_dashcam.py"));
     }
     app.path().resource_dir().ok().map(|dir| dir.join("vibe_dashcam.py"))
+}
+
+fn core_binary_path(app: &tauri::App) -> Option<PathBuf> {
+    let name = if cfg!(windows) { "vibe-dashcam-core.exe" } else { "vibe-dashcam-core" };
+    app.path().resource_dir().ok().map(|dir| dir.join(name))
+}
+
+fn spawn_binary_core(program: &Path) -> std::io::Result<Child> {
+    let mut command = Command::new(program);
+    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    command.spawn()
 }
 
 fn spawn_python_core(script: &Path) -> std::io::Result<Child> {

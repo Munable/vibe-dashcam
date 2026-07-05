@@ -29,6 +29,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
+APP_NAME = "vibe-dashcam"
+APP_VERSION = "0.1.0"
+SOURCE_KINDS = {"codex_session", "hook", "demo"}
+ALLOWED_ORIGINS = {
+    "http://127.0.0.1:1420",
+    "http://localhost:1420",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+    "tauri://localhost",
+}
+
 
 @dataclass(frozen=True)
 class FeedbackDecision:
@@ -122,6 +133,8 @@ class FailureSignalDetector:
         return FeedbackDecision(False, "none", "未检测到明确硬失败信号", 0.2)
 
     def _has_failure_signal(self, text: str) -> bool:
+        if re.search(r"\bexit code:\s*0\b", text):
+            return False
         if re.search(r"\bexit code:\s*[1-9]\d*\b", text):
             return True
         if any(phrase in text for phrase in self.hard_failure_phrases):
@@ -152,6 +165,7 @@ class FailureSignalDetector:
 SAFE_EVENT_FIELDS = (
     "client",
     "source",
+    "source_kind",
     "event_type",
     "user_input",
     "prompt",
@@ -199,6 +213,14 @@ APP_STATE: Dict[str, object] = {
     "failure_count": 0,
     "case_count": 0,
     "latest_case": None,
+    "source_status": {
+        "codex_session": {
+            "active": False,
+            "path": None,
+            "last_seen_at": None,
+            "last_event_name": None,
+        }
+    },
 }
 
 
@@ -210,6 +232,25 @@ def update_app_state(**changes: object) -> None:
 def get_app_state() -> Dict[str, object]:
     with APP_STATE_LOCK:
         return dict(APP_STATE)
+
+
+def update_source_status(name: str, **changes: object) -> None:
+    state = get_app_state()
+    source_status = dict(state.get("source_status") or {})
+    current = dict(source_status.get(name) or {})
+    current.update(changes)
+    source_status[name] = current
+    update_app_state(source_status=source_status)
+
+
+def mark_codex_session_seen(root: Path, event: Dict[str, object]) -> None:
+    update_source_status(
+        "codex_session",
+        active=True,
+        path=str(root),
+        last_seen_at=_utc_now(),
+        last_event_name=str(_event_target(event) or event.get("event_type") or "event"),
+    )
 
 
 CASE_HISTORY_LOCK = threading.Lock()
@@ -297,6 +338,9 @@ def _sanitize_event(payload: Dict[str, Any]) -> Dict[str, object]:
 
     if event and "event_type" not in event:
         event["event_type"] = "message"
+    source_kind = str(event.get("source_kind") or "")
+    if source_kind and source_kind not in SOURCE_KINDS:
+        event.pop("source_kind", None)
     if event and "client" not in event:
         event["client"] = str(event.get("skill_name") or "unknown")
     return event
@@ -338,6 +382,12 @@ class SummaryGenerator:
         """
         events = recent_events or []
         clients = [str(e.get("client")) for e in events if e.get("client")]
+        source_kind = "hook"
+        for event in reversed(events):
+            value = event.get("source_kind")
+            if value:
+                source_kind = str(value)
+                break
         tools = []
         for event in events:
             target = _event_target(event)
@@ -387,6 +437,7 @@ class SummaryGenerator:
             "confidence": decision.confidence if decision else 0.5,
             "suspected_client": suspected_client,
             "suspected_skill": suspected_skill,
+            "source_kind": source_kind,
             "events_count": len(events),
             "wasted_tokens": token_estimate,
             "wasted_cost": cost_estimate,
@@ -616,6 +667,7 @@ def extract_codex_session_event(record: Dict[str, Any]) -> Optional[Dict[str, ob
             if message:
                 return {
                     "client": "codex",
+                    "source_kind": "codex_session",
                     "event_type": "UserPromptSubmit",
                     "user_input": message,
                 }
@@ -624,6 +676,7 @@ def extract_codex_session_event(record: Dict[str, Any]) -> Optional[Dict[str, ob
             if message:
                 return {
                     "client": "codex",
+                    "source_kind": "codex_session",
                     "event_type": "AssistantMessage",
                     "ai_output": message,
                 }
@@ -633,6 +686,7 @@ def extract_codex_session_event(record: Dict[str, Any]) -> Optional[Dict[str, ob
             if isinstance(total, (int, float)):
                 return {
                     "client": "codex",
+                    "source_kind": "codex_session",
                     "event_type": "TokenCount",
                     "token_count": int(total),
                 }
@@ -643,6 +697,7 @@ def extract_codex_session_event(record: Dict[str, Any]) -> Optional[Dict[str, ob
             tool = _as_text(invocation.get("tool")) or "unknown"
             event: Dict[str, object] = {
                 "client": "codex",
+                "source_kind": "codex_session",
                 "event_type": "McpToolUse",
                 "tool_name": f"mcp__{server}.{tool}",
             }
@@ -659,6 +714,7 @@ def extract_codex_session_event(record: Dict[str, Any]) -> Optional[Dict[str, ob
             if tool_name:
                 event = {
                     "client": "codex",
+                    "source_kind": "codex_session",
                     "event_type": "PostToolUse",
                     "tool_name": f"{namespace}.{tool_name}" if namespace else tool_name,
                 }
@@ -673,6 +729,7 @@ def extract_codex_session_event(record: Dict[str, Any]) -> Optional[Dict[str, ob
             if output:
                 return {
                     "client": "codex",
+                    "source_kind": "codex_session",
                     "event_type": "ToolOutput",
                     "ai_output": output,
                 }
@@ -681,6 +738,7 @@ def extract_codex_session_event(record: Dict[str, Any]) -> Optional[Dict[str, ob
             if text:
                 return {
                     "client": "codex",
+                    "source_kind": "codex_session",
                     "event_type": "AssistantMessage",
                     "ai_output": text,
                 }
@@ -697,7 +755,7 @@ class CodexSessionTailer:
         poll_interval: float = 1.0,
     ) -> None:
         self.on_event = on_event
-        self.sessions_root = sessions_root or Path(os.environ.get("USERPROFILE", "")) / ".codex" / "sessions"
+        self.sessions_root = sessions_root or Path.home() / ".codex" / "sessions"
         self.poll_interval = poll_interval
         self._offsets: Dict[Path, int] = {}
         self._running = False
@@ -753,6 +811,7 @@ class CodexSessionTailer:
                             continue
                         event = extract_codex_session_event(record)
                         if event:
+                            mark_codex_session_seen(self.sessions_root, event)
                             self.on_event(event)
                     self._offsets[path] = handle.tell()
             except Exception:
@@ -772,8 +831,25 @@ class DashcamServer(http.server.BaseHTTPRequestHandler):
     summarizer = SummaryGenerator()
     paused = False
 
+    def _origin_allowed(self) -> bool:
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        path = urlparse(self.path).path
+        return path in {"/hook", "/health"} or origin in ALLOWED_ORIGINS
+
+    def _guard_origin(self) -> bool:
+        if self._origin_allowed():
+            return True
+        self._send_json(403, {"ok": False, "error": "origin_forbidden"})
+        return False
+
     def end_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self.headers.get("Origin")
+        if origin in ALLOWED_ORIGINS:
+            self.send_header("Access-Control-Allow-Origin", origin)
+        elif urlparse(self.path).path == "/hook":
+            self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         super().end_headers()
@@ -810,6 +886,10 @@ class DashcamServer(http.server.BaseHTTPRequestHandler):
         if cls.paused:
             return
         event = _sanitize_event(payload)
+        if event and not event.get("source_kind"):
+            event["source_kind"] = "codex_session" if event.get("client") == "codex" else "hook"
+        if event.get("source_kind") == "codex_session":
+            mark_codex_session_seen(Path.home() / ".codex" / "sessions", event)
         recent_events = cls.recent_events.snapshot()
         hard_decision = cls.failure_detector.classify(event, recent_events) if event else FeedbackDecision(False, "none", "", 0.0)
         if hard_decision.negative:
@@ -846,10 +926,17 @@ class DashcamServer(http.server.BaseHTTPRequestHandler):
                 update_app_state(ok_event_count=int(state.get("ok_event_count") or 0) + 1)
 
     def do_OPTIONS(self) -> None:
+        if not self._guard_origin():
+            return
         self._send_json(200, {"ok": True})
 
     def do_GET(self) -> None:
+        if not self._guard_origin():
+            return
         path = urlparse(self.path).path
+        if path == "/health":
+            self._send_json(200, {"ok": True, "app": APP_NAME, "version": APP_VERSION})
+            return
         if path == "/state":
             self._send_json(200, self._state_payload())
             return
@@ -859,9 +946,12 @@ class DashcamServer(http.server.BaseHTTPRequestHandler):
         self._send_json(404, {"ok": False, "error": "not_found"})
 
     def do_POST(self) -> None:
+        if not self._guard_origin():
+            return
         path = urlparse(self.path).path
         payload = self._read_payload()
         if path == '/hook':
+            payload["source_kind"] = "hook"
             DashcamServer.ingest_payload(payload)
             self._send_json(200, {"ok": True})
             return
@@ -893,16 +983,19 @@ class DashcamServer(http.server.BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True, "state": self._state_payload()})
             return
         if path == "/test-capture":
-            before = int(get_app_state().get("failure_count") or 0)
-            DashcamServer.ingest_payload({
+            demo_event = {
                 "client": "vibe-dashcam",
+                "source_kind": "demo",
                 "event_type": "McpToolUse",
                 "tool_name": "mcp__demo.timeout",
                 "ai_output": "timeout",
                 "token_count": 321,
-            })
-            after = int(get_app_state().get("failure_count") or 0)
-            self._send_json(200, {"ok": True, "created": after > before, "state": self._state_payload()})
+            }
+            decision = DashcamServer.failure_detector.classify(demo_event, [])
+            demo_case = DashcamServer.summarizer.generate([demo_event], "timeout", decision)
+            demo_case.setdefault("source_kind", "demo")
+            demo_case.setdefault("evidence_type", _evidence_type_label(demo_case))
+            self._send_json(200, {"ok": True, "created": False, "demo_case": demo_case, "state": self._state_payload()})
             return
         self._send_json(404, {"ok": False, "error": "not_found"})
 
@@ -1026,8 +1119,10 @@ def main() -> None:
     server_thread.start()
     # 监听 Codex 本地 session 日志，作为不依赖 hook 信任的接入方式。
     try:
-        tailer_active = CodexSessionTailer(DashcamServer.ingest_payload).start()
-        update_app_state(tailer_active=tailer_active, tailer_error=None if tailer_active else "Codex sessions not found")
+        tailer = CodexSessionTailer(DashcamServer.ingest_payload)
+        tailer_active = tailer.start()
+        update_source_status("codex_session", active=tailer_active, path=str(tailer.sessions_root))
+        update_app_state(tailer_active=tailer_active, tailer_error=None if tailer_active else "codex_sessions_not_found")
     except Exception as exc:
         update_app_state(tailer_active=False, tailer_error=str(exc))
     print("[Vibe-Dashcam] Core API listening on http://localhost:8080", file=sys.stderr)

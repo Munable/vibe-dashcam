@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build:core && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -35,7 +35,7 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../../vibe_dashcam/vibe_dashcam.py": "vibe_dashcam.py"
+      "bin/vibe-dashcam-core.exe": "vibe-dashcam-core.exe"
     }
   }
 }

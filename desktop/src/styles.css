@@ -420,6 +420,17 @@ button {
   border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+.demo-button {
+  display: inline-flex;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border-radius: 7px;
+  color: rgba(244, 247, 252, 0.82);
+  font-size: 11px;
+}
+
 .setting-block strong {
   font-size: 12px;
 }

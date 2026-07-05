@@ -45,12 +45,13 @@ The current build uses conservative local rules. Later model review can help sum
 - Runs locally and listens on `http://localhost:8080/hook`.
 - Ships a Tauri + React desktop HUD designed as a small bottom-right red/black board.
 - Starts the local evidence core automatically from the desktop app when port 8080 is not already active.
+- Bundles the local evidence core into the Windows desktop package, so users do not need to install Python.
 - Watches local Codex session JSONL files as the default no-trust path.
 - Accepts short hook summaries from Claude Code, Hermes, OpenCode, or other clients.
 - Detects Codex Skill reads from `SKILL.md` paths.
 - Detects MCP calls from `mcp__...` tool namespaces and MCP event summaries.
 - Keeps only the latest 12 field-whitelisted, truncated, secret-redacted behavior summaries.
-- Shows Skill/MCP clean/crash counts, latest token receipt, local save, copy receipt, pause, and test capture.
+- Shows Skill/MCP clean/flagged counts, latest estimated receipt, local save, copy receipt, and pause.
 - Does not ask for API keys.
 - Does not read `.env`.
 - Does not upload anything to the public internet in this build.
@@ -65,7 +66,9 @@ npm install
 npm run tauri dev
 ```
 
-The native desktop HUD requires Node.js, Rust/Cargo, and Python available as `python` or `py`. For a frontend-only build check:
+Development requires Node.js, Rust/Cargo, Python, and PyInstaller. The packaged Windows app bundles the local core.
+
+For a frontend-only build check:
 
 ```powershell
 cd .\desktop
@@ -104,7 +107,7 @@ cd .\desktop
 npm run tauri build
 ```
 
-The desktop app starts the local evidence core automatically. The current bundle still relies on the system Python runtime; bundling Python itself is left for distribution to machines without Python.
+The desktop app starts the bundled local evidence core automatically. Development mode still uses the system Python runtime for faster debugging.
 
 ## Not Yet
 

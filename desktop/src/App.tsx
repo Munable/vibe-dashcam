@@ -12,12 +12,14 @@ import {
   TestTube2,
   X
 } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 const API = "http://localhost:8080";
 
 type TraceEvent = {
   event_type?: string;
+  source_kind?: string;
   skill_name?: string;
   tool_name?: string;
   client?: string;
@@ -27,6 +29,7 @@ type TraceEvent = {
 
 type CaseItem = {
   id?: string;
+  source_kind?: string;
   created_at?: string;
   evidence_type?: string;
   suspected_skill?: string;
@@ -44,6 +47,15 @@ type SkillRow = {
   last_seen?: string;
 };
 
+type SourceStatus = {
+  codex_session?: {
+    active?: boolean;
+    path?: string | null;
+    last_seen_at?: string | null;
+    last_event_name?: string | null;
+  };
+};
+
 type AppState = {
   listening?: boolean;
   paused?: boolean;
@@ -58,6 +70,7 @@ type AppState = {
   last_event_at?: string | null;
   latest_case?: CaseItem | null;
   skill_board?: SkillRow[];
+  source_status?: SourceStatus;
 };
 
 const emptyState: AppState = {
@@ -91,7 +104,7 @@ function formatTime(value?: string | null) {
 }
 
 function formatReceipt(item?: CaseItem | null) {
-  if (!item) return "No token receipt yet.";
+  if (!item) return "No estimated receipt yet.";
   const traces = (item.recent_events || [])
     .slice(-3)
     .map((event) => {
@@ -101,10 +114,11 @@ function formatReceipt(item?: CaseItem | null) {
     })
     .join("\n");
   return [
-    "Token receipt",
+    "Estimated receipt",
     `Type: ${item.evidence_type || "Evidence"}`,
-    `Target: ${item.suspected_skill || "unknown"}`,
-    `Tokens: ${item.wasted_tokens ?? "?"}`,
+    `Source: ${sourceName(item.source_kind)}`,
+    `Target: ${displayTarget(item.suspected_skill)}`,
+    `Estimated tokens: ${item.wasted_tokens ?? "?"}`,
     `Cost: $${item.wasted_cost ?? "?"}`,
     "",
     item.summary || "Evidence candidate captured.",
@@ -112,9 +126,30 @@ function formatReceipt(item?: CaseItem | null) {
   ].join("\n");
 }
 
-function stateLabel(state: AppState, apiOnline: boolean) {
-  if (!apiOnline) return "Core offline";
+function displayTarget(value?: string | null) {
+  if (!value) return "unknown";
+  if (value.startsWith("mcp__")) return value.slice(5);
+  return value;
+}
+
+function sourceName(value?: string | null) {
+  if (value === "codex_session") return "Codex session";
+  if (value === "hook") return "Hook";
+  if (value === "demo") return "Demo";
+  return "Local";
+}
+
+function coreStatusLabel(value: string) {
+  if (value === "port_occupied") return "Port occupied";
+  if (value === "core_missing") return "Core missing";
+  if (value === "core_start_failed") return "Core start failed";
+  return "Core offline";
+}
+
+function stateLabel(state: AppState, apiOnline: boolean, coreStatus: string) {
+  if (!apiOnline) return coreStatusLabel(coreStatus);
   if (state.server_error) return "Port error";
+  if (state.tailer_error === "codex_sessions_not_found") return "Codex sessions not found";
   if (state.paused) return "Paused";
   if (state.listening) return "Listening";
   return "Starting";
@@ -127,14 +162,17 @@ export function App() {
   const [expanded, setExpanded] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [apiOnline, setApiOnline] = useState(false);
+  const [coreStatus, setCoreStatus] = useState("starting");
   const [flashId, setFlashId] = useState<string | null>(null);
   const [saveNote, setSaveNote] = useState("");
+  const [demoCase, setDemoCase] = useState<CaseItem | null>(null);
   const latestCaseIdRef = useRef<string | null>(null);
 
   async function refresh() {
     try {
       const nextState = await requestJson<AppState>("/state");
       setApiOnline(true);
+      setCoreStatus("ok");
       setState(nextState);
       const caseId = nextState.latest_case?.id || null;
       if (caseId && caseId !== latestCaseIdRef.current) {
@@ -150,6 +188,11 @@ export function App() {
       }
     } catch {
       setApiOnline(false);
+      try {
+        setCoreStatus(await invoke<string>("core_launch_status"));
+      } catch {
+        setCoreStatus("core_offline");
+      }
     }
   }
 
@@ -169,7 +212,8 @@ export function App() {
   const successPct = totalEvents ? Math.round((success / totalEvents) * 100) : 0;
   const failurePct = totalEvents ? 100 - successPct : 0;
   const rows = state.skill_board || [];
-  const sourceLabel = state.tailer_active ? "Codex live" : "Hook only";
+  const codexSource = state.source_status?.codex_session;
+  const sourceLabel = codexSource?.last_seen_at ? "Live from Codex session" : "Waiting for Codex";
 
   async function togglePause() {
     const payload = await requestJson<{ state: AppState }>("/control/pause", {
@@ -180,7 +224,8 @@ export function App() {
   }
 
   async function testCapture() {
-    await requestJson("/test-capture", { method: "POST", body: "{}" });
+    const payload = await requestJson<{ demo_case?: CaseItem }>("/test-capture", { method: "POST", body: "{}" });
+    setDemoCase(payload.demo_case || null);
     await refresh();
   }
 
@@ -229,14 +274,14 @@ export function App() {
         </header>
 
         <div className="status-line">
-          <span>{stateLabel(state, apiOnline)}</span>
+          <span>{stateLabel(state, apiOnline, coreStatus)}</span>
           <span>{sourceLabel} / {formatTime(state.last_event_at)}</span>
         </div>
 
         <section className="split-panel" aria-label="success failure overview">
           <div className="split-copy">
             <span>{success} clean</span>
-            <span>{failures} crash</span>
+            <span>{failures} flagged</span>
           </div>
           <div className="split-bar">
             <div className="success-bar" style={{ width: `${successPct}%` }} />
@@ -250,7 +295,7 @@ export function App() {
             <Activity size={14} />
           </div>
           {rows.length === 0 ? (
-            <div className="empty">Waiting for Codex Skill/MCP activity.</div>
+            <div className="empty">No real records yet.</div>
           ) : (
             rows.slice(0, 5).map((row) => {
               const rowTotal = Math.max(row.success + row.failure, 1);
@@ -262,8 +307,8 @@ export function App() {
                   onClick={() => setExpanded(true)}
                 >
                   <div className="row-main">
-                    <span>{row.target}</span>
-                    <small>{row.success} OK / {row.failure} BAD</small>
+                    <span>{displayTarget(row.target)}</span>
+                    <small>{row.success} clean / {row.failure} flag</small>
                   </div>
                   <div className="row-bar">
                     <i className="row-ok" style={{ width: `${100 - rowFailPct}%` }} />
@@ -278,8 +323,8 @@ export function App() {
         <section className={`latest ${expanded ? "expanded" : ""} ${flashId === selectedCase?.id ? "flash" : ""}`}>
           <button className="latest-head" onClick={() => setExpanded(!expanded)}>
             <div>
-              <span>Latest token receipt</span>
-              <strong>{selectedCase?.suspected_skill || "No case yet"}</strong>
+              <span>Latest estimated receipt</span>
+              <strong>{selectedCase ? displayTarget(selectedCase.suspected_skill) : "No case yet"}</strong>
             </div>
             {expanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
           </button>
@@ -287,13 +332,13 @@ export function App() {
             <div className="latest-body">
               <p>{selectedCase?.summary || "No evidence captured yet."}</p>
               <div className="case-meta">
-                <span>{selectedCase?.evidence_type || "Waiting"}</span>
-                <span>{selectedCase?.wasted_tokens ?? 0} tokens</span>
+                <span>{selectedCase ? sourceName(selectedCase.source_kind) : "Waiting"}</span>
+                <span>{selectedCase?.wasted_tokens ?? 0} estimated tokens</span>
               </div>
               <div className="trace-list">
                 {(selectedCase?.recent_events || []).slice(-3).map((event, index) => (
                   <span key={`${event.event_type}-${index}`}>
-                    {event.event_type || "event"} / {event.skill_name || event.tool_name || event.client || "unknown"}
+                    {event.event_type || "event"} / {displayTarget(event.skill_name || event.tool_name || event.client)}
                   </span>
                 ))}
               </div>
@@ -311,7 +356,7 @@ export function App() {
                 setExpanded(true);
               }}
             >
-              <span>{item.suspected_skill || "unknown"}</span>
+              <span>{displayTarget(item.suspected_skill)}</span>
               <small>{item.wasted_tokens ?? 0}</small>
             </button>
           ))}
@@ -319,7 +364,6 @@ export function App() {
 
         <footer className="actions">
           <button onClick={togglePause}>{state.paused ? <Play size={15} /> : <Pause size={15} />}{state.paused ? "Resume" : "Pause"}</button>
-          <button onClick={testCapture}><TestTube2 size={15} />Probe</button>
           <button onClick={saveCase} disabled={!selectedCase}><Save size={15} />Save</button>
           <button onClick={copyReceipt} disabled={!selectedCase}><Clipboard size={15} />Copy</button>
         </footer>
@@ -338,6 +382,11 @@ export function App() {
           <SettingBlock title="Privacy" lines={["Secret redaction on", "Text truncation on", "No cloud upload"]} />
           <SettingBlock title="Storage" lines={["Local JSONL cases", "Save only on click"]} />
           <SettingBlock title="Window" lines={["Bottom-right minimap", "Always on top"]} />
+          <div className="setting-block">
+            <strong>Demo</strong>
+            <button className="demo-button" onClick={testCapture}><TestTube2 size={14} />Demo sample</button>
+            {demoCase && <span>{displayTarget(demoCase.suspected_skill)} · {demoCase.wasted_tokens ?? 0} estimated tokens</span>}
+          </div>
         </aside>
       )}
     </main>

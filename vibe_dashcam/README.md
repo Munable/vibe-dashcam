@@ -44,6 +44,7 @@ The current build uses conservative local rules. Later model review can help sum
 
 - Runs locally and listens on `http://localhost:8080/hook`.
 - Ships a Tauri + React desktop HUD designed as a small bottom-right red/black board.
+- Starts the local evidence core automatically from the desktop app when port 8080 is not already active.
 - Watches local Codex session JSONL files as the default no-trust path.
 - Accepts short hook summaries from Claude Code, Hermes, OpenCode, or other clients.
 - Detects Codex Skill reads from `SKILL.md` paths.
@@ -59,16 +60,12 @@ The current build uses conservative local rules. Later model review can help sum
 PowerShell:
 
 ```powershell
-# From the repository root, terminal 1: start the local evidence core
-python .\vibe_dashcam\vibe_dashcam.py
-
-# Terminal 2: start the desktop HUD
 cd .\desktop
 npm install
 npm run tauri dev
 ```
 
-The native desktop HUD requires Node.js and Rust/Cargo because it is built with Tauri. For a frontend-only build check:
+The native desktop HUD requires Node.js, Rust/Cargo, and Python available as `python` or `py`. For a frontend-only build check:
 
 ```powershell
 cd .\desktop
@@ -105,7 +102,7 @@ cd .\desktop
 npm run tauri build
 ```
 
-The Python core still runs as a separate local service in this build. Bundling it as a Tauri sidecar is intentionally left for the next packaging pass.
+The desktop app starts the local evidence core automatically. The current bundle still relies on the system Python runtime; bundling Python itself is left for distribution to machines without Python.
 
 ## Not Yet
 

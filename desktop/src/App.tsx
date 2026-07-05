@@ -139,6 +139,7 @@ export function App() {
       const caseId = nextState.latest_case?.id || null;
       if (caseId && caseId !== latestCaseIdRef.current) {
         latestCaseIdRef.current = caseId;
+        setSelectedCaseId(caseId);
         setFlashId(caseId);
         window.setTimeout(() => setFlashId(null), 1400);
       }
@@ -164,10 +165,11 @@ export function App() {
 
   const success = Number(state.ok_event_count || 0);
   const failures = Number(state.failure_count || 0);
-  const total = Math.max(success + failures, 1);
-  const successPct = Math.round((success / total) * 100);
-  const failurePct = 100 - successPct;
+  const totalEvents = success + failures;
+  const successPct = totalEvents ? Math.round((success / totalEvents) * 100) : 0;
+  const failurePct = totalEvents ? 100 - successPct : 0;
   const rows = state.skill_board || [];
+  const sourceLabel = state.tailer_active ? "Codex live" : "Hook only";
 
   async function togglePause() {
     const payload = await requestJson<{ state: AppState }>("/control/pause", {
@@ -184,13 +186,17 @@ export function App() {
 
   async function saveCase() {
     if (!selectedCase) return;
-    const payload = await requestJson<{ path: string }>("/cases/save", {
-      method: "POST",
-      body: JSON.stringify({ case_id: selectedCase.id })
-    });
-    setSaveNote(`Saved local receipt`);
+    try {
+      const payload = await requestJson<{ path: string; exists?: boolean }>("/cases/save", {
+        method: "POST",
+        body: JSON.stringify({ case_id: selectedCase.id })
+      });
+      setSaveNote(payload.exists === false ? "Save failed" : "Saved local receipt");
+      console.info(payload.path);
+    } catch {
+      setSaveNote("Save failed");
+    }
     window.setTimeout(() => setSaveNote(""), 1600);
-    console.info(payload.path);
   }
 
   async function copyReceipt() {
@@ -224,7 +230,7 @@ export function App() {
 
         <div className="status-line">
           <span>{stateLabel(state, apiOnline)}</span>
-          <span>{formatTime(state.last_event_at)}</span>
+          <span>{sourceLabel} / {formatTime(state.last_event_at)}</span>
         </div>
 
         <section className="split-panel" aria-label="success failure overview">
@@ -244,7 +250,7 @@ export function App() {
             <Activity size={14} />
           </div>
           {rows.length === 0 ? (
-            <div className="empty">No Skill/MCP hits yet. Test capture can seed the board.</div>
+            <div className="empty">Waiting for Codex Skill/MCP activity.</div>
           ) : (
             rows.slice(0, 5).map((row) => {
               const rowTotal = Math.max(row.success + row.failure, 1);
@@ -313,7 +319,7 @@ export function App() {
 
         <footer className="actions">
           <button onClick={togglePause}>{state.paused ? <Play size={15} /> : <Pause size={15} />}{state.paused ? "Resume" : "Pause"}</button>
-          <button onClick={testCapture}><TestTube2 size={15} />Test</button>
+          <button onClick={testCapture}><TestTube2 size={15} />Probe</button>
           <button onClick={saveCase} disabled={!selectedCase}><Save size={15} />Save</button>
           <button onClick={copyReceipt} disabled={!selectedCase}><Clipboard size={15} />Copy</button>
         </footer>
@@ -331,7 +337,7 @@ export function App() {
           <SettingBlock title="Sources" lines={["Codex session logs", "Local hook payloads"]} />
           <SettingBlock title="Privacy" lines={["Secret redaction on", "Text truncation on", "No cloud upload"]} />
           <SettingBlock title="Storage" lines={["Local JSONL cases", "Save only on click"]} />
-          <SettingBlock title="Window" lines={["Bottom-right minimap", "Always-on-top via Tauri"]} />
+          <SettingBlock title="Window" lines={["Bottom-right minimap", "Always on top"]} />
         </aside>
       )}
     </main>

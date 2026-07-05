@@ -84,13 +84,16 @@ class FailureSignalDetector:
     """本地硬失败检测：只认 Skill/MCP 附近的明确错误信号。"""
 
     hard_failure_phrases = (
-        "error", "exception", "traceback", "timeout", "timed out",
-        "failed", "failure", "nonzero", "non-zero", "exit code",
+        "exception", "traceback", "timeout", "timed out",
+        "nonzero", "non-zero",
         "mcp error", "tool call failed", "connection refused",
         "permission denied", "错误", "失败", "超时", "异常", "报错",
     )
     hard_event_types = (
         "toolerror", "mcperror", "posttooluseerror", "error",
+    )
+    signal_event_types = (
+        "mcptooluse", "posttooluse", "tooloutput", "functioncalloutput",
     )
 
     def classify(
@@ -102,13 +105,14 @@ class FailureSignalDetector:
             return FeedbackDecision(False, "none", "未检测到 Skill/MCP 上下文", 0.0)
 
         event_type = str(event.get("event_type") or "").strip().lower()
+        if event_type not in self.hard_event_types and event_type not in self.signal_event_types:
+            return FeedbackDecision(False, "none", "当前事件不是工具执行信号", 0.1)
+
         signal_text = " ".join(
             str(event.get(field) or "")
-            for field in ("event_type", "ai_output", "tool_name", "skill_name")
+            for field in ("event_type", "ai_output")
         ).lower()
-        if event_type in self.hard_event_types or any(
-            phrase in signal_text for phrase in self.hard_failure_phrases
-        ):
+        if event_type in self.hard_event_types or self._has_failure_signal(signal_text):
             return FeedbackDecision(
                 True,
                 "skill_mcp_hard_failure",
@@ -116,6 +120,16 @@ class FailureSignalDetector:
                 0.82,
             )
         return FeedbackDecision(False, "none", "未检测到明确硬失败信号", 0.2)
+
+    def _has_failure_signal(self, text: str) -> bool:
+        if re.search(r"\bexit code:\s*[1-9]\d*\b", text):
+            return True
+        if any(phrase in text for phrase in self.hard_failure_phrases):
+            return True
+        return bool(re.search(
+            r"\b(error|failed|failure)\b(?!\s*[\"']?\s*:\s*(null|0|false)\b)",
+            text,
+        ))
 
     def has_skill_or_mcp_context(
         self,
@@ -235,7 +249,14 @@ def _update_skill_stats(target: str, failed: bool, tokens: int = 0) -> None:
 def get_skill_board(limit: int = 8) -> List[Dict[str, object]]:
     with SKILL_STATS_LOCK:
         rows = [dict(item) for item in SKILL_STATS.values()]
-    return sorted(rows, key=lambda item: str(item.get("last_seen") or ""), reverse=True)[:limit]
+    return sorted(
+        rows,
+        key=lambda item: (
+            int(item.get("failure") or 0),
+            str(item.get("last_seen") or ""),
+        ),
+        reverse=True,
+    )[:limit]
 
 
 def _as_text(value: object) -> Optional[str]:
@@ -333,6 +354,8 @@ class SummaryGenerator:
 
         token_estimate = 0
         for event in events:
+            if event.get("event_type") == "TokenCount":
+                continue
             explicit_tokens = event.get("token_count")
             if isinstance(explicit_tokens, (int, float)):
                 token_estimate += int(explicit_tokens)
@@ -853,7 +876,16 @@ class DashcamServer(http.server.BaseHTTPRequestHandler):
                 self._send_json(404, {"ok": False, "error": "no_case"})
                 return
             saved_path = save_local_case(case)
-            self._send_json(200, {"ok": True, "path": str(saved_path)})
+            exists = saved_path.exists()
+            size = saved_path.stat().st_size if exists else 0
+            status = 200 if exists else 500
+            self._send_json(status, {
+                "ok": exists,
+                "path": str(saved_path),
+                "exists": exists,
+                "bytes": size,
+                "error": None if exists else "save_failed",
+            })
             return
         if path == "/control/pause":
             paused = payload.get("paused")
@@ -928,6 +960,8 @@ def save_local_case(data: Dict[str, object], path: Optional[Path] = None) -> Pat
     record = {"saved_at": _utc_now(), "case": data}
     with target.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
     return target
 
 

@@ -24,8 +24,10 @@ from vibe_dashcam.vibe_dashcam import (
     SKILL_STATS,
     SKILL_STATS_LOCK,
     SummaryGenerator,
+    get_skill_board,
     _parse_toml_model,
     _sanitize_event,
+    _update_skill_stats,
     format_evidence_receipt,
     save_local_case,
     scan_configurations,
@@ -134,6 +136,39 @@ class VibeDashcamTests(unittest.TestCase):
         self.assertTrue(mcp_error.negative)
         self.assertEqual(mcp_error.category, "skill_mcp_hard_failure")
 
+    def test_hard_failure_detector_ignores_clean_status_output(self) -> None:
+        detector = FailureSignalDetector()
+
+        decision = detector.classify(
+            {
+                "event_type": "ToolOutput",
+                "ai_output": 'Exit code: 0\n{"server_error":null,"failure_count":0}',
+            },
+            [{"event_type": "McpToolUse", "tool_name": "mcp__node_repl.js_reset"}],
+        )
+
+        self.assertFalse(decision.negative)
+
+    def test_hard_failure_detector_flags_nonzero_exit_code(self) -> None:
+        detector = FailureSignalDetector()
+
+        decision = detector.classify(
+            {"event_type": "ToolOutput", "ai_output": "Exit code: 1\nboom"},
+            [{"event_type": "McpToolUse", "tool_name": "mcp__node_repl.js_reset"}],
+        )
+
+        self.assertTrue(decision.negative)
+
+    def test_hard_failure_detector_ignores_assistant_words_near_mcp(self) -> None:
+        detector = FailureSignalDetector()
+
+        decision = detector.classify(
+            {"event_type": "AssistantMessage", "ai_output": "保存失败时显示失败提示"},
+            [{"event_type": "McpToolUse", "tool_name": "mcp__node_repl.js_reset"}],
+        )
+
+        self.assertFalse(decision.negative)
+
     def test_summary_uses_recent_events_and_cautious_negative_language(self) -> None:
         decision = FeedbackClassifier().classify("wrong, undo that")
         summary = SummaryGenerator().generate(
@@ -207,6 +242,38 @@ class VibeDashcamTests(unittest.TestCase):
         )
 
         self.assertEqual(summary["suspected_skill"], "mcp__node_repl.js")
+
+    def test_summary_ignores_session_total_token_count_events(self) -> None:
+        decision = FailureSignalDetector().classify({
+            "event_type": "McpToolUse",
+            "tool_name": "mcp__demo.timeout",
+            "ai_output": "timeout",
+        })
+
+        summary = SummaryGenerator().generate(
+            [
+                {"client": "codex", "event_type": "TokenCount", "token_count": 999999},
+                {
+                    "client": "vibe-dashcam",
+                    "event_type": "McpToolUse",
+                    "tool_name": "mcp__demo.timeout",
+                    "ai_output": "timeout",
+                    "token_count": 321,
+                },
+            ],
+            trigger_text="timeout",
+            decision=decision,
+        )
+
+        self.assertEqual(summary["wasted_tokens"], 321)
+
+    def test_skill_board_prioritizes_failures_before_recent_successes(self) -> None:
+        _update_skill_stats("mcp__ok.newer", failed=False)
+        _update_skill_stats("mcp__bad.older", failed=True)
+
+        board = get_skill_board()
+
+        self.assertEqual(board[0]["target"], "mcp__bad.older")
 
     def test_toml_scan_reads_model_without_exposing_api_key(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -432,6 +499,8 @@ class VibeDashcamTests(unittest.TestCase):
             saved_lines = saved_path.read_text(encoding="utf-8").splitlines()
 
         self.assertTrue(response["ok"])
+        self.assertTrue(response["exists"])
+        self.assertGreater(response["bytes"], 0)
         self.assertEqual(len(saved_lines), 1)
         self.assertEqual(json.loads(saved_lines[0])["case"]["id"], case_id)
 

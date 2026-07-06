@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::{
     env, fs,
     io::{Read, Write},
@@ -5,9 +7,10 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Mutex,
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
-use tauri::{Manager, State};
+use tauri::{AppHandle, Manager, State};
 
 struct CoreProcess(Mutex<Option<Child>>);
 struct CoreStatus(Mutex<String>);
@@ -16,14 +19,17 @@ fn main() {
     tauri::Builder::default()
         .manage(CoreProcess(Mutex::new(None)))
         .manage(CoreStatus(Mutex::new(String::from("starting"))))
-        .invoke_handler(tauri::generate_handler![core_launch_status])
+        .invoke_handler(tauri::generate_handler![
+            core_launch_status,
+            set_window_always_on_top
+        ])
         .setup(|app| {
             start_core(app);
             if let Some(window) = app.get_webview_window("main") {
                 if let Ok(Some(monitor)) = window.current_monitor() {
                     let work_area = monitor.work_area();
                     let window_size = window.outer_size()?;
-                    let margin = 18;
+                    let margin = 24;
                     let x = work_area.position.x
                         + work_area.size.width as i32
                         - window_size.width as i32
@@ -39,16 +45,23 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("error while building Vibe-Dashcam")
-        .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { .. } = event {
-                stop_core(app);
-            }
+        .run(|app, event| match event {
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => stop_core(app),
+            _ => {}
         });
 }
 
 #[tauri::command]
 fn core_launch_status(status: State<CoreStatus>) -> String {
     status.0.lock().expect("core status lock").clone()
+}
+
+#[tauri::command]
+fn set_window_always_on_top(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| String::from("window_missing"))?;
+    window.set_always_on_top(enabled).map_err(|error| error.to_string())
 }
 
 fn start_core(app: &tauri::App) {
@@ -77,7 +90,12 @@ fn start_core(app: &tauri::App) {
     match child {
         Ok(child) => {
             *app.state::<CoreProcess>().0.lock().expect("core process lock") = Some(child);
-            set_core_status(app, "ok");
+            if wait_for_core_health(Duration::from_secs(15)) {
+                set_core_status(app, "ok");
+            } else {
+                stop_core(app.handle());
+                set_core_status(app, "core_start_failed");
+            }
         }
         Err(_) => set_core_status(app, "core_start_failed"),
     };
@@ -97,7 +115,22 @@ fn core_health_ok() -> bool {
         return false;
     }
     let mut response = String::new();
-    stream.read_to_string(&mut response).is_ok() && response.contains("vibe-dashcam")
+    if stream.read_to_string(&mut response).is_err() {
+        return false;
+    }
+    let healthy_status = response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200");
+    healthy_status && response.contains("\"app\"") && response.contains("\"vibe-dashcam\"")
+}
+
+fn wait_for_core_health(timeout: Duration) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if core_health_ok() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(150));
+    }
+    false
 }
 
 fn stop_core(app: &tauri::AppHandle) {
@@ -108,8 +141,27 @@ fn stop_core(app: &tauri::AppHandle) {
         .expect("core process lock")
         .take()
     {
-        let _ = child.kill();
+        kill_core_process_tree(&mut child);
+        let _ = child.wait();
     }
+}
+
+#[cfg(windows)]
+fn kill_core_process_tree(child: &mut Child) {
+    let mut command = Command::new("taskkill");
+    command
+        .args(["/PID", &child.id().to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(0x08000000);
+    let _ = command.status();
+}
+
+#[cfg(not(windows))]
+fn kill_core_process_tree(child: &mut Child) {
+    let _ = child.kill();
 }
 
 fn core_script_path(app: &tauri::App) -> Option<PathBuf> {
@@ -126,7 +178,14 @@ fn core_script_path(app: &tauri::App) -> Option<PathBuf> {
 
 fn core_binary_path(app: &tauri::App) -> Option<PathBuf> {
     let name = if cfg!(windows) { "vibe-dashcam-core.exe" } else { "vibe-dashcam-core" };
-    app.path().resource_dir().ok().map(|dir| dir.join(name))
+    app.path().resource_dir().ok().map(|dir| {
+        let onedir = dir.join("vibe-dashcam-core").join(name);
+        if onedir.exists() {
+            onedir
+        } else {
+            dir.join(name)
+        }
+    })
 }
 
 fn spawn_binary_core(program: &Path) -> std::io::Result<Child> {

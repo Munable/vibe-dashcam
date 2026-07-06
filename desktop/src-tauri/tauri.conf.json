@@ -15,14 +15,14 @@
       {
         "label": "main",
         "title": "Vibe-Dashcam",
-        "width": 336,
-        "height": 420,
+        "width": 360,
+        "height": 400,
         "minWidth": 320,
-        "minHeight": 420,
+        "minHeight": 396,
         "resizable": false,
         "decorations": false,
         "transparent": true,
-        "alwaysOnTop": true,
+        "alwaysOnTop": false,
         "shadow": true,
         "skipTaskbar": false
       }
@@ -30,12 +30,14 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "nsis"
+    ],
     "icon": [
       "icons/icon.ico"
     ],
     "resources": {
-      "bin/vibe-dashcam-core.exe": "vibe-dashcam-core.exe"
+      "bin/vibe-dashcam-core": "vibe-dashcam-core"
     }
   }
 }

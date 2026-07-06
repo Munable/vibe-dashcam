@@ -5,10 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420",
-    "build:core": "pyinstaller --noconfirm --onefile --name vibe-dashcam-core --distpath src-tauri/bin --workpath src-tauri/target/pyinstaller --specpath src-tauri/target/pyinstaller ../vibe_dashcam/vibe_dashcam.py",
+    "build:core": "pyinstaller --noconfirm --onedir --noconsole --name vibe-dashcam-core --distpath src-tauri/bin --workpath src-tauri/target/pyinstaller --specpath src-tauri/target/pyinstaller ../vibe_dashcam/vibe_dashcam.py",
     "build": "tsc && vite build",
     "preview": "vite preview --host 127.0.0.1 --port 1420",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "release:windows": "tauri build"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",

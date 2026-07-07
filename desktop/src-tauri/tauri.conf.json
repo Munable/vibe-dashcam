@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build:core && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -15,14 +15,14 @@
       {
         "label": "main",
         "title": "Vibe-Dashcam",
-        "width": 336,
-        "height": 420,
+        "width": 360,
+        "height": 400,
         "minWidth": 320,
-        "minHeight": 420,
+        "minHeight": 396,
         "resizable": false,
         "decorations": false,
         "transparent": true,
-        "alwaysOnTop": true,
+        "alwaysOnTop": false,
         "shadow": true,
         "skipTaskbar": false
       }
@@ -30,12 +30,14 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "nsis"
+    ],
     "icon": [
       "icons/icon.ico"
     ],
     "resources": {
-      "../../vibe_dashcam/vibe_dashcam.py": "vibe_dashcam.py"
+      "bin/vibe-dashcam-core": "vibe-dashcam-core"
     }
   }
 }

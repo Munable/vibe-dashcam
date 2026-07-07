@@ -1,11 +1,29 @@
 import json
+import os
 import sys
 import urllib.request
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 
 DASHCAM_URL = "http://localhost:8080/hook"
 MAX_FIELD_CHARS = 1200
+TOKEN_HEADER = "X-Vibe-Dashcam-Token"
+
+
+def _config_path() -> Path:
+    base = os.environ.get("LOCALAPPDATA")
+    root = Path(base) if base else Path.home() / ".vibe-dashcam"
+    return root / "VibeDashcam" / "config.json"
+
+
+def _hook_token() -> Optional[str]:
+    try:
+        data = json.loads(_config_path().read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    token = data.get("hook_token") if isinstance(data, dict) else None
+    return token if isinstance(token, str) and token else None
 
 
 def _as_text(value: Any) -> Optional[str]:
@@ -58,10 +76,14 @@ def build_dashcam_payload(data: Dict[str, Any], event_type: str) -> Dict[str, ob
 
 def post_payload(payload: Dict[str, object]) -> None:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    token = _hook_token()
+    if token:
+        headers[TOKEN_HEADER] = token
     req = urllib.request.Request(
         DASHCAM_URL,
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     try:
         urllib.request.urlopen(req, timeout=0.7).read()

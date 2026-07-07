@@ -2,60 +2,86 @@
 
 ## AI Skills Are Burning Your Tokens. Keep the Receipt.
 
-![Vibe-Dashcam catches Skill/MCP token waste and prints a local evidence receipt](vibe_dashcam/assets/readme-illustrations/01-vibe-dashcam-token-receipt.png)
+![Vibe-Dashcam local Codex HUD concept](vibe_dashcam/assets/readme-illustrations/02-vibe-dashcam-github-hero.png)
 
-Vibe-Dashcam is a local desktop dashcam for AI coding agents. It watches tiny local summaries from your agent session, then turns suspicious Skill/MCP failures into a reviewable local case.
+Vibe-Dashcam is a small local desktop dashcam for Codex. It watches Codex Skill/MCP signals, keeps a lightweight red/black board in the corner of your screen, and saves a local receipt when a Skill or MCP path looks like it wasted model time.
 
-The first target is not "all AI mistakes". The first target is narrower and meaner:
+It is not a cloud platform. It is not an agent marketplace. It is not trying to judge every AI mistake.
 
-> When a Skill or MCP server wastes expensive model time, catch the evidence before the context disappears.
+It does one ugly job first:
 
-This is the first local brick for Vibe-Hub: a future public board for real-world Skill/MCP failure reports.
+> Catch real Codex Skill/MCP failure evidence before the context disappears.
 
-## The Degen Rule
+## What It Catches
 
-Do not build a giant lab before you can catch the crash.
+Vibe-Dashcam only cares about cases with Skill/MCP involvement.
 
-Vibe-Dashcam keeps the rule simple:
+| Signal | What it means | What the HUD shows |
+| --- | --- | --- |
+| Skill evidence | Codex reads a `SKILL.md` file | clean or failed Skill row |
+| MCP evidence | Codex calls an `mcp__server.tool` style tool | clean or failed MCP row |
+| Hard failure | nonzero exit, MCP error, timeout, traceback, permission denial, failed tool call | failed receipt first, review later |
+| Soft failure | user pushes back after Skill/MCP activity: "wrong", "undo", "不对", "撤销" | rebuttal receipt |
 
-1. A Skill/MCP signal opens a short observation window.
-2. Tool-crash evidence becomes a case when the Skill/MCP itself leaves an error trail.
-3. User-rebuttal evidence becomes a case when the user pushes back after that Skill/MCP was active.
-4. No Skill/MCP signal, no public blame.
+No Skill/MCP signal, no blame. Normal model mistakes stay out of the board.
 
-That keeps normal model mistakes separate from tool, Skill, and MCP failures.
+## How It Works
 
-## Two Evidence Triggers
+1. You open the tiny desktop HUD.
+2. The local core tails `~/.codex/sessions` and accepts optional Codex hook summaries on `localhost:8080`.
+3. Local rules flag only Skill/MCP-related candidates.
+4. For real flagged cases, Vibe-Dashcam can run one short local review through your own Codex CLI:
 
-Tool-crash evidence:
+```powershell
+codex exec --ephemeral --sandbox read-only --output-schema <schema> -
+```
 
-- The Skill/MCP reports `error`, `timeout`, `failed`, nonzero exit, exception, MCP error, or similar.
-- Dashcam marks a crash-evidence candidate immediately.
+If you select a review model in the HUD, it passes that model to Codex:
 
-User-rebuttal evidence:
+```powershell
+codex exec --model <model> --ephemeral --sandbox read-only --output-schema <schema> -
+```
 
-- A Skill/MCP was active.
-- The next user input says things like "wrong", "undo", "not like this", "不对", "重来", "撤销".
-- Dashcam marks a rebuttal-evidence candidate because the tool path likely drifted.
+The review receives a redacted short case summary, not your full repo.
 
-The current build uses conservative local rules. Later model review can help summarize the case, but the trigger stays boring on purpose.
+## Current Beta
 
-## Current Local Build
+- Codex-only.
+- Windows desktop beta first.
+- Bottom-right HUD, not a big dashboard.
+- Real data only in the main board; demo samples stay isolated.
+- Today / All-time stats.
+- Clickable success and failure rows.
+- Saved local receipts restored after restart.
+- Local config check from the settings panel.
+- Review model list read from local Codex model/config/profile data.
+- Windows package bundles the Python core, so normal users do not need Python.
 
-- Runs locally and listens on `http://localhost:8080/hook`.
-- Ships a Tauri + React desktop HUD designed as a small bottom-right red/black board.
-- Starts the local evidence core automatically from the desktop app when port 8080 is not already active.
-- Watches local Codex session JSONL files as the default no-trust path.
-- Accepts short hook summaries from Claude Code, Hermes, OpenCode, or other clients.
-- Detects Codex Skill reads from `SKILL.md` paths.
-- Detects MCP calls from `mcp__...` tool namespaces and MCP event summaries.
-- Keeps only the latest 12 field-whitelisted, truncated, secret-redacted behavior summaries.
-- Shows Skill/MCP clean/crash counts, latest token receipt, local save, copy receipt, pause, and test capture.
-- Does not ask for API keys.
-- Does not read `.env`.
-- Does not upload anything to the public internet in this build.
+## Privacy Boundary
 
-## Run On Windows
+Vibe-Dashcam stays boring on purpose:
+
+- No account.
+- No cloud upload.
+- No public leaderboard upload.
+- No OpenAI/Anthropic/Spark API key.
+- No `.env` reading.
+- No full source-file capture.
+- No Windows startup or Codex auto-launch hook.
+
+Real flagged cases are auto-saved locally:
+
+```text
+%LOCALAPPDATA%\VibeDashcam\cases.jsonl
+```
+
+Hook configuration lives locally:
+
+```text
+%LOCALAPPDATA%\VibeDashcam\config.json
+```
+
+## Run From Source
 
 PowerShell:
 
@@ -65,66 +91,71 @@ npm install
 npm run tauri dev
 ```
 
-The native desktop HUD requires Node.js, Rust/Cargo, and Python available as `python` or `py`. For a frontend-only build check:
+Development requires Node.js, Rust/Cargo, Python, and PyInstaller.
+
+## Build Windows Installer
 
 ```powershell
 cd .\desktop
-npm install
-npm run build
+npm run release:windows
 ```
 
-## Hook Payload
+The installer is generated at:
 
-Codex can be watched from local session logs. Other clients can POST a small JSON payload to `/hook`.
+```text
+desktop\src-tauri\target\release\bundle\nsis\Vibe-Dashcam_0.1.0_x64-setup.exe
+```
 
-Send less, not more. Never send secrets or full source files.
+## Optional Codex Hook
 
-An optional Codex hook example lives at `examples/codex/vibe_dashcam_hook.py`.
+Codex session tailing works without a custom hook. A hook is only an extra signal path when session logs are not enough.
+
+The hook must:
+
+- POST only to `http://localhost:8080/hook`.
+- Include `X-Vibe-Dashcam-Token` from the local config.
+- Send tiny summaries only.
+- Fail silently when Dashcam is closed.
+- Never start Dashcam, never install startup items, never send secrets.
+
+Example:
 
 ```json
 {
   "client": "codex",
+  "source_kind": "hook",
   "event_type": "McpToolUse",
-  "user_input": "optional user prompt summary",
+  "user_input": "optional short prompt summary",
   "ai_output": "short error or assistant summary",
   "skill_name": "optional-skill-name",
   "tool_name": "mcp__server.tool",
+  "call_id": "optional-tool-call-id",
+  "model": "optional-current-model",
   "token_count": 120
 }
 ```
 
-Dashcam keeps only these fields: `client`, `event_type`, `user_input`, `ai_output`, `skill_name`, `tool_name`, `model`, `token_count`. Text fields are truncated and common secret patterns are replaced before display or local save.
+See [`examples/codex/vibe_dashcam_hook.py`](examples/codex/vibe_dashcam_hook.py) and [`vibe_dashcam/INSTALL_FOR_AGENT.md`](vibe_dashcam/INSTALL_FOR_AGENT.md).
 
-## Package
+## 中文简介
 
-Windows:
+Vibe-Dashcam 是一个本地 Codex 行车记录仪。它不是大平台，不做账号，不上传云端，也不假装能判断所有 AI 错误。
 
-```powershell
-cd .\desktop
-npm run tauri build
-```
+它只先盯一个最贵的地方：
 
-The desktop app starts the local evidence core automatically. The current bundle still relies on the system Python runtime; bundling Python itself is left for distribution to machines without Python.
+> Codex 里的 Skill / MCP 到底有没有在真实使用里翻车。
 
-## Not Yet
-
-This local build does not run Vibe-Hub, publish a leaderboard, read the whole repository, prove code correctness, or auto-shame a project online.
-
-It only creates local evidence cards. Public upload should stay explicit and user-approved.
-
----
-
-# 中文版
-
-## 震惊：你的 AI Skill 可能在偷偷烧 Token，先把账单拍下来
-
-Vibe-Dashcam 是一个本地 AI 编程行车记录仪。它不做重型评测平台，不搞全仓库回放，也不假装能判断所有代码对错。它只先盯住最值钱的一层：Skill 和 MCP 有没有在真实使用里翻车。
-
-土狗规则很简单：
+土狗规则：
 
 1. 先看到 Skill/MCP 参与，才进入观察窗口。
-2. Skill/MCP 自己报错、超时、失败，就是工具崩溃证据。
-3. Skill/MCP 跑完后用户说“不对、重来、撤销”，就是用户驳斥证据。
-4. 没摸到 Skill/MCP，就不乱扣锅。
+2. Skill/MCP 自己报错、超时、失败，就是硬失败。
+3. Skill/MCP 之后用户说“不对、撤销、重来”，就是软失败。
+4. 没有 Skill/MCP 证据，就不乱扣锅。
 
-当前版本只在本地生成候选账单，不上传公网，不要 API Key，不读 `.env`。后面 Vibe-Hub 要做红黑榜，也应该基于这种真实、本地、可脱敏的证据，而不是靠营销文案吹哪个 Skill 很神。
+硬失败会先立刻显示在右下角小窗里；随后本机 Codex 可以读一小段脱敏上下文，给出一句话复核。复核走用户自己的 `codex exec`，不需要新的 API Key。
+
+本地记录会保存在 `%LOCALAPPDATA%\VibeDashcam\cases.jsonl`，重启后还能看到历史。主榜单只显示真实数据，demo 不混进去。
+
+## License
+
+MIT

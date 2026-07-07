@@ -57,6 +57,16 @@ button {
   padding: 8px;
 }
 
+.drag-strip {
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  right: 42px;
+  left: 0;
+  height: 28px;
+  cursor: move;
+}
+
 .topbar,
 .status-line,
 .split-copy,
@@ -72,6 +82,8 @@ button {
 }
 
 .topbar {
+  position: relative;
+  z-index: 1;
   cursor: move;
   user-select: none;
 }
@@ -108,6 +120,14 @@ button {
   display: flex;
   align-items: center;
   gap: 5px;
+}
+
+.size-control {
+  flex: 0 0 auto;
+}
+
+.size-control button {
+  width: 22px;
 }
 
 .status-dot {

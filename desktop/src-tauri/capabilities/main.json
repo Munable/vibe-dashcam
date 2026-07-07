@@ -3,5 +3,5 @@
   "identifier": "main",
   "description": "Permissions for the main Vibe-Dashcam window.",
   "windows": ["main"],
-  "permissions": ["core:default", "core:window:allow-set-position"]
+  "permissions": ["core:default", "core:window:allow-set-position", "core:window:allow-set-size"]
 }

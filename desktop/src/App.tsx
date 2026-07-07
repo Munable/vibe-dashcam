@@ -14,7 +14,7 @@ import {
   X
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow, PhysicalPosition } from "@tauri-apps/api/window";
+import { getCurrentWindow, LogicalSize, PhysicalPosition } from "@tauri-apps/api/window";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 const API = "http://localhost:8080";
@@ -22,6 +22,7 @@ const API = "http://localhost:8080";
 type Lang = "en" | "zh";
 type StatsScope = "today" | "all";
 type BoardMode = "success" | "failure";
+type WindowSizeName = "small" | "medium" | "large";
 
 type TraceEvent = {
   event_type?: string;
@@ -135,6 +136,13 @@ const emptyState: AppState = {
   display_failure_count: 0
 };
 
+const WINDOW_SIZE_KEY = "vibe-dashcam-window-size";
+const WINDOW_SIZES: Record<WindowSizeName, { width: number; height: number }> = {
+  small: { width: 320, height: 396 },
+  medium: { width: 360, height: 400 },
+  large: { width: 430, height: 500 }
+};
+
 const COPY = {
   en: {
     localOnly: "Local only",
@@ -222,6 +230,13 @@ const COPY = {
     oldHistoryCleared: "Old history cleared",
     clearHistoryFailed: "Clear failed",
     window: "Window",
+    windowSize: "Size",
+    windowSizeChanged: "Window size changed",
+    sizeLabels: {
+      small: "S",
+      medium: "M",
+      large: "L"
+    },
     keepOnTop: "Keep on top",
     on: "On",
     off: "Off",
@@ -345,6 +360,13 @@ const COPY = {
     oldHistoryCleared: "旧历史已清理",
     clearHistoryFailed: "清理失败",
     window: "窗口",
+    windowSize: "大小",
+    windowSizeChanged: "窗口大小已切换",
+    sizeLabels: {
+      small: "小",
+      medium: "中",
+      large: "大"
+    },
     keepOnTop: "保持置顶",
     on: "开",
     off: "关",
@@ -401,6 +423,11 @@ function initialLanguage(): Lang {
   const saved = window.localStorage.getItem("vibe-dashcam-language");
   if (saved === "en" || saved === "zh") return saved;
   return window.navigator.language.toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
+function initialWindowSize(): WindowSizeName {
+  const saved = window.localStorage.getItem(WINDOW_SIZE_KEY);
+  return saved === "small" || saved === "large" ? saved : "medium";
 }
 
 function formatTime(value: string | null | undefined, lang: Lang, copy: Copy) {
@@ -579,6 +606,7 @@ export function App() {
   const [demoCase, setDemoCase] = useState<CaseItem | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsPayload | null>(null);
   const [modelDraft, setModelDraft] = useState("default");
+  const [windowSize, setWindowSize] = useState<WindowSizeName>(initialWindowSize);
   const [alwaysOnTop, setAlwaysOnTop] = useState(() => window.localStorage.getItem("vibe-dashcam-always-on-top") === "true");
   const latestCaseIdRef = useRef<string | null>(null);
   const dragCleanupRef = useRef<(() => void) | null>(null);
@@ -633,6 +661,10 @@ export function App() {
 
   useEffect(() => {
     invoke("set_window_always_on_top", { enabled: alwaysOnTop }).catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    applyWindowSize(windowSize, false);
   }, []);
 
   useEffect(() => {
@@ -692,6 +724,34 @@ export function App() {
       setSaveNote(copy.windowControlUnavailable);
     }
     window.setTimeout(() => setSaveNote(""), 1400);
+  }
+
+  async function applyWindowSize(next: WindowSizeName, notify = true) {
+    const size = WINDOW_SIZES[next];
+    const appWindow = getCurrentWindow();
+    try {
+      const [position, oldSize] = await Promise.all([
+        appWindow.outerPosition(),
+        appWindow.outerSize()
+      ]);
+      await appWindow.setSize(new LogicalSize(size.width, size.height));
+      const newSize = await appWindow.outerSize();
+      await appWindow.setPosition(new PhysicalPosition(
+        position.x + oldSize.width - newSize.width,
+        position.y + oldSize.height - newSize.height
+      ));
+      setWindowSize(next);
+      window.localStorage.setItem(WINDOW_SIZE_KEY, next);
+      if (notify) {
+        setSaveNote(`${copy.windowSizeChanged}: ${copy.sizeLabels[next]}`);
+        window.setTimeout(() => setSaveNote(""), 1200);
+      }
+    } catch {
+      if (notify) {
+        setSaveNote(copy.windowControlUnavailable);
+        window.setTimeout(() => setSaveNote(""), 1400);
+      }
+    }
   }
 
   async function setStatsScope(next: StatsScope) {
@@ -819,6 +879,7 @@ export function App() {
         className={`glass-card ${expanded ? "is-expanded" : ""} ${hasFailureCase ? "has-case" : "no-case"}`}
         onMouseDown={startWindowDrag}
       >
+        <div className="drag-strip" onMouseDown={startWindowDrag} aria-hidden="true" />
         <header className="topbar" data-tauri-drag-region>
           <div className="brand">
             <Radar size={18} />
@@ -834,6 +895,19 @@ export function App() {
               aria-label={stateLabel(state, apiOnline, coreStatus, copy)}
               title={stateLabel(state, apiOnline, coreStatus, copy)}
             />
+            <div className="segmented-control size-control" aria-label={copy.windowSize}>
+              {(Object.keys(WINDOW_SIZES) as WindowSizeName[]).map((size) => (
+                <button
+                  key={size}
+                  type="button"
+                  className={windowSize === size ? "active" : ""}
+                  onClick={() => applyWindowSize(size)}
+                  title={`${copy.windowSize}: ${copy.sizeLabels[size]}`}
+                >
+                  {copy.sizeLabels[size]}
+                </button>
+              ))}
+            </div>
             <button
               className="icon-button"
               onClick={() => {

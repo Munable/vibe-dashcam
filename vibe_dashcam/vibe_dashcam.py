@@ -1429,13 +1429,10 @@ class DashcamServer(http.server.BaseHTTPRequestHandler):
 
         raw_user_input = event.get("user_input") if event else _as_text(payload.get("user_input") or payload.get("prompt") or "")
         user_input = str(raw_user_input or "")
-        local_decision = cls.classifier.classify(str(user_input))
-        decision = local_decision
+        decision = FeedbackDecision(False, "unknown", "没有进行语义判断", 0.0)
         has_tool_context = bool(recent_events and cls.failure_detector.has_skill_or_mcp_context(event, recent_events))
         if user_input and has_tool_context:
             decision = cls.semantic_classifier.classify(user_input, recent_events)
-            if not decision.negative and decision.category == "unknown" and local_decision.negative:
-                decision = local_decision
         if decision.negative:
             if has_tool_context:
                 summary_data = cls.summarizer.generate(

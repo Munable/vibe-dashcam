@@ -627,14 +627,14 @@ class VibeDashcamTests(unittest.TestCase):
         self.assertEqual(summary["category"], "ai_failed_previous_result")
         self.assertIn("开发不对", summary["trigger_text"])
 
-    def test_dashcam_server_semantic_check_overrides_regex_soft_failure(self) -> None:
+    def test_dashcam_server_has_no_regex_fallback_when_semantic_is_unknown(self) -> None:
         class FakeSemanticClassifier:
             def __init__(self) -> None:
                 self.calls = 0
 
             def classify(self, user_input, recent_events):
                 self.calls += 1
-                return FeedbackDecision(False, "user_changed_mind", "用户是在改需求，不是纠偏上一轮", 0.8)
+                return FeedbackDecision(False, "unknown", "语义判断不可用", 0.0)
 
             def set_model(self, value):
                 return str(value)

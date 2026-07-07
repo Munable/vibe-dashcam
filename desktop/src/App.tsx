@@ -606,7 +606,6 @@ export function App() {
   const [windowSize, setWindowSize] = useState<WindowSizeName>(initialWindowSize);
   const [alwaysOnTop, setAlwaysOnTop] = useState(() => window.localStorage.getItem("vibe-dashcam-always-on-top") === "true");
   const latestCaseIdRef = useRef<string | null>(null);
-  const dragCleanupRef = useRef<(() => void) | null>(null);
   const copy = COPY[lang];
 
   async function refresh() {
@@ -836,38 +835,12 @@ export function App() {
     window.setTimeout(() => setSaveNote(""), 1600);
   }
 
-  useEffect(() => {
-    return () => dragCleanupRef.current?.();
-  }, []);
-
   function startWindowDrag(event: React.MouseEvent<HTMLElement>) {
     if (event.button !== 0) return;
     const target = event.target as HTMLElement;
     if (target.closest("button, select, input, textarea, a")) return;
     event.preventDefault();
-    dragCleanupRef.current?.();
-
-    const appWindow = getCurrentWindow();
-    const scale = window.devicePixelRatio || 1;
-    const startX = event.screenX;
-    const startY = event.screenY;
-    const originX = Math.round((event.screenX - event.clientX) * scale);
-    const originY = Math.round((event.screenY - event.clientY) * scale);
-
-    const handleMove = (moveEvent: MouseEvent) => {
-      const nextX = Math.round(originX + (moveEvent.screenX - startX) * scale);
-      const nextY = Math.round(originY + (moveEvent.screenY - startY) * scale);
-      appWindow.setPosition(new PhysicalPosition(nextX, nextY)).catch(() => undefined);
-    };
-    const cleanup = () => {
-      document.removeEventListener("mousemove", handleMove);
-      document.removeEventListener("mouseup", cleanup);
-      dragCleanupRef.current = null;
-    };
-
-    document.addEventListener("mousemove", handleMove);
-    document.addEventListener("mouseup", cleanup);
-    dragCleanupRef.current = cleanup;
+    getCurrentWindow().startDragging().catch(() => undefined);
   }
 
   return (

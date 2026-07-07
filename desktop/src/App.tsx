@@ -22,7 +22,7 @@ const API = "http://localhost:8080";
 type Lang = "en" | "zh";
 type StatsScope = "today" | "all";
 type BoardMode = "success" | "failure";
-type WindowSizeName = "small" | "medium" | "large";
+type WindowSizeName = "small" | "large";
 
 type TraceEvent = {
   event_type?: string;
@@ -139,7 +139,6 @@ const emptyState: AppState = {
 const WINDOW_SIZE_KEY = "vibe-dashcam-window-size";
 const WINDOW_SIZES: Record<WindowSizeName, { width: number; height: number }> = {
   small: { width: 320, height: 396 },
-  medium: { width: 360, height: 400 },
   large: { width: 430, height: 500 }
 };
 
@@ -234,7 +233,6 @@ const COPY = {
     windowSizeChanged: "Window size changed",
     sizeLabels: {
       small: "S",
-      medium: "M",
       large: "L"
     },
     keepOnTop: "Keep on top",
@@ -364,7 +362,6 @@ const COPY = {
     windowSizeChanged: "窗口大小已切换",
     sizeLabels: {
       small: "小",
-      medium: "中",
       large: "大"
     },
     keepOnTop: "保持置顶",
@@ -427,7 +424,7 @@ function initialLanguage(): Lang {
 
 function initialWindowSize(): WindowSizeName {
   const saved = window.localStorage.getItem(WINDOW_SIZE_KEY);
-  return saved === "small" || saved === "large" ? saved : "medium";
+  return saved === "large" ? "large" : "small";
 }
 
 function formatTime(value: string | null | undefined, lang: Lang, copy: Copy) {

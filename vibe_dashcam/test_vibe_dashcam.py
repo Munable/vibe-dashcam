@@ -1303,6 +1303,14 @@ class VibeDashcamTests(unittest.TestCase):
         self.assertIn("--model", calls[0])
         self.assertEqual(calls[0][calls[0].index("--model") + 1], "gpt-5.3-codex-spark")
 
+    def test_set_review_model_updates_both_codex_call_paths(self) -> None:
+        model = DashcamServer.set_review_model("gpt-5.5", persist=False)
+
+        self.assertEqual(model, "gpt-5.5")
+        self.assertEqual(DashcamServer.case_reviewer.review_model, "gpt-5.5")
+        self.assertEqual(DashcamServer.semantic_classifier.review_model, "gpt-5.5")
+        self.assertEqual(get_app_state()["review_model"], "gpt-5.5")
+
     def test_windows_subprocesses_hide_console_windows(self) -> None:
         kwargs = _subprocess_no_window_kwargs()
         if os.name == "nt":

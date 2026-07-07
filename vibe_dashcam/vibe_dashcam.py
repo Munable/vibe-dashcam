@@ -67,9 +67,12 @@ class FeedbackClassifier:
 
     denial_phrases = (
         "wrong", "not right", "undo", "rollback", "start over",
-        "you misunderstood", "that's not what i asked",
+        "you misunderstood", "that's not what i asked", "this is not what i wanted",
+        "the implementation is wrong", "the result is wrong",
         "不对", "不是这样", "理解错", "全部重来", "重新来",
         "重做", "撤销", "撤回", "回滚", "别乱改", "做错了",
+        "方向不对", "做偏了", "偏了", "效果不对", "开发不对",
+        "实现不对", "这段不对", "不是我要的", "不符合",
     )
     changed_mind_phrases = (
         "改成", "换成", "顺便", "再加", "instead", "also add",
@@ -1097,10 +1100,13 @@ def build_soft_feedback_prompt(user_input: str, recent_events: List[Dict[str, ob
     }
     return (
         "You are Vibe-Dashcam's lightweight soft-failure classifier.\n"
-        "Decide whether the latest user input is correcting, rejecting, undoing, or complaining about the immediately previous Skill/MCP-assisted result.\n"
-        "Return negative=true only when the user clearly refers to the previous Skill/MCP-assisted result shown in the trace.\n"
+        "Decide whether the latest user input is correcting, rejecting, undoing, or complaining about the immediately previous work result.\n"
+        "The user does not need to name a Skill, MCP, tool, plugin, file, or call id.\n"
+        "Broad critiques like 'this development is wrong', 'the effect is wrong', 'the direction is off', '不对', '效果不对', or '这段开发不对' count as negative when the trace shows Skill/MCP involvement nearby.\n"
+        "Return negative=true when the user clearly rejects the previous result and the trace contains nearby Skill/MCP participation.\n"
         "Return negative=false when the user is merely giving a new task, adding a normal follow-up, or changing requirements without blaming the previous result.\n"
-        "Return negative=false when the complaint points to the base model, the user changed their mind, or the trace cannot connect the input to the previous Skill/MCP result.\n"
+        "Return negative=false when the user changed their mind or the trace cannot connect the input to nearby Skill/MCP-assisted work.\n"
+        "Do not decide final blame here; later review can still say tool_fault, model_fault, or unclear.\n"
         "Use only the provided redacted summary. Do not use tools. Return only JSON matching the schema.\n\n"
         f"Input:\n{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
     )

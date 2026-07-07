@@ -195,6 +195,12 @@ class VibeDashcamTests(unittest.TestCase):
         self.assertTrue(decision.negative)
         self.assertEqual(decision.category, "ai_failed_previous_result")
 
+    def test_feedback_classifier_labels_product_result_rebuttal_as_negative(self) -> None:
+        decision = FeedbackClassifier().classify("这个效果不对，中间这一段开发方向偏了")
+
+        self.assertTrue(decision.negative)
+        self.assertEqual(decision.category, "ai_failed_previous_result")
+
     def test_hard_failure_detector_requires_skill_or_mcp_context(self) -> None:
         detector = FailureSignalDetector()
 
@@ -583,6 +589,27 @@ class VibeDashcamTests(unittest.TestCase):
         self.assertEqual(fake.calls, 1)
         self.assertEqual(summary["category"], "ai_failed_previous_result")
         self.assertIn("上一版", summary["trigger_text"])
+
+    def test_dashcam_server_catches_generic_result_rebuttal_after_skill_context(self) -> None:
+        DashcamServer.recent_events.clear()
+        drain_queue(DashcamServer.summary_queue)
+
+        DashcamServer.ingest_payload({
+            "client": "codex",
+            "source_kind": "codex_session",
+            "event_type": "McpToolUse",
+            "tool_name": "mcp__node_repl.js",
+        })
+        DashcamServer.ingest_payload({
+            "client": "codex",
+            "source_kind": "codex_session",
+            "event_type": "UserPromptSubmit",
+            "user_input": "这个效果不对，中间这一段开发不对，整体方向偏了",
+        })
+
+        summary = DashcamServer.summary_queue.get_nowait()
+        self.assertEqual(summary["category"], "ai_failed_previous_result")
+        self.assertIn("开发不对", summary["trigger_text"])
 
     def test_dashcam_server_semantic_soft_failure_ignores_normal_followup(self) -> None:
         class FakeSemanticClassifier:
@@ -1186,7 +1213,8 @@ class VibeDashcamTests(unittest.TestCase):
 
         self.assertIn("Attribute only to a target/call_id present in the trace", review_prompt)
         self.assertIn("evidence_spans", review_prompt)
-        self.assertIn("Return negative=true only when the user clearly refers", soft_prompt)
+        self.assertIn("The user does not need to name a Skill", soft_prompt)
+        self.assertIn("Broad critiques", soft_prompt)
         self.assertIn("trace cannot connect", soft_prompt)
 
     def test_semantic_feedback_classifier_passes_selected_model(self) -> None:

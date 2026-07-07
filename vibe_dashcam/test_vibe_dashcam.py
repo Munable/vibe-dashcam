@@ -591,6 +591,20 @@ class VibeDashcamTests(unittest.TestCase):
         self.assertIn("上一版", summary["trigger_text"])
 
     def test_dashcam_server_catches_generic_result_rebuttal_after_skill_context(self) -> None:
+        class FakeSemanticClassifier:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def classify(self, user_input, recent_events):
+                self.calls += 1
+                self.last_input = user_input
+                return FeedbackDecision(True, "ai_failed_previous_result", "用户语义上在纠偏上一轮", 0.86)
+
+            def set_model(self, value):
+                return str(value)
+
+        fake = FakeSemanticClassifier()
+        DashcamServer.semantic_classifier = fake
         DashcamServer.recent_events.clear()
         drain_queue(DashcamServer.summary_queue)
 
@@ -608,8 +622,43 @@ class VibeDashcamTests(unittest.TestCase):
         })
 
         summary = DashcamServer.summary_queue.get_nowait()
+        self.assertEqual(fake.calls, 1)
+        self.assertIn("开发不对", fake.last_input)
         self.assertEqual(summary["category"], "ai_failed_previous_result")
         self.assertIn("开发不对", summary["trigger_text"])
+
+    def test_dashcam_server_semantic_check_overrides_regex_soft_failure(self) -> None:
+        class FakeSemanticClassifier:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def classify(self, user_input, recent_events):
+                self.calls += 1
+                return FeedbackDecision(False, "user_changed_mind", "用户是在改需求，不是纠偏上一轮", 0.8)
+
+            def set_model(self, value):
+                return str(value)
+
+        fake = FakeSemanticClassifier()
+        DashcamServer.semantic_classifier = fake
+        DashcamServer.recent_events.clear()
+        drain_queue(DashcamServer.summary_queue)
+
+        DashcamServer.ingest_payload({
+            "client": "codex",
+            "source_kind": "codex_session",
+            "event_type": "McpToolUse",
+            "tool_name": "mcp__node_repl.js",
+        })
+        DashcamServer.ingest_payload({
+            "client": "codex",
+            "source_kind": "codex_session",
+            "event_type": "UserPromptSubmit",
+            "user_input": "不对，改成另一个全新的方案",
+        })
+
+        self.assertEqual(fake.calls, 1)
+        self.assertTrue(DashcamServer.summary_queue.empty())
 
     def test_dashcam_server_semantic_soft_failure_ignores_normal_followup(self) -> None:
         class FakeSemanticClassifier:
@@ -719,6 +768,14 @@ class VibeDashcamTests(unittest.TestCase):
         self.assertTrue(DashcamServer.summary_queue.empty())
 
     def test_dashcam_server_redacts_user_trigger_text_before_saving_case(self) -> None:
+        class FakeSemanticClassifier:
+            def classify(self, user_input, recent_events):
+                return FeedbackDecision(True, "ai_failed_previous_result", "用户纠偏上一轮", 0.8)
+
+            def set_model(self, value):
+                return str(value)
+
+        DashcamServer.semantic_classifier = FakeSemanticClassifier()
         DashcamServer.ingest_payload({
             "client": "codex",
             "source_kind": "codex_session",
